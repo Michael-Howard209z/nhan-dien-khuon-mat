@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Server Nhận Diện Khuôn Mặt</title>
+<style>
+  :root{
+    --bg:#0f1220; --card:#181c2f; --line:#2a2f4a; --txt:#e8ebf7;
+    --muted:#9aa3c7; --acc:#5b8cff; --ok:#38d39f; --bad:#ff6b6b;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);
+       font:15px/1.5 "Segoe UI",Roboto,system-ui,sans-serif}
+  header{display:flex;align-items:center;justify-content:space-between;gap:12px;
+         padding:14px 22px;background:linear-gradient(90deg,#151a30,#1c2342);
+         border-bottom:1px solid var(--line);flex-wrap:wrap}
+  header h1{font-size:19px;margin:0;letter-spacing:.3px}
+  .chips{display:flex;gap:8px;flex-wrap:wrap}
+  .chip{font-size:12.5px;padding:4px 11px;border-radius:999px;
+        background:#23294a;border:1px solid var(--line);color:var(--muted)}
+  .chip b{color:var(--txt)}
+  .dot{display:inline-block;width:9px;height:9px;border-radius:50%;
+       background:var(--bad);margin-right:6px}
+  .dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+  main{display:grid;grid-template-columns:1.25fr 1fr;gap:16px;padding:16px 22px;
+       max-width:1400px;margin:0 auto}
+  @media(max-width:1050px){main{grid-template-columns:1fr}}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:14px;
+        padding:16px;margin-bottom:16px}
+  .card h2{margin:0 0 12px;font-size:15px;text-transform:uppercase;
+           letter-spacing:.8px;color:var(--muted)}
+  .video{position:relative;background:#000;border-radius:10px;overflow:hidden;
+         aspect-ratio:4/3;display:flex;align-items:center;justify-content:center}
+  .video img{width:100%;height:100%;object-fit:contain;display:block}
+  .badge{position:absolute;top:8px;left:8px;font-size:12px;padding:3px 9px;
+         border-radius:6px;background:rgba(0,0,0,.65);color:#fff}
+  .dets{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;min-height:30px}
+  .det{font-size:13px;padding:5px 10px;border-radius:8px;background:#20314f;
+       border:1px solid #2f4b7d;color:#cfe1ff}
+  .det small{color:var(--muted)}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  input,button,select{font:inherit}
+  input[type=text],input[type=date]{width:100%;padding:9px 11px;margin-bottom:10px;
+    background:#10142a;border:1px solid var(--line);border-radius:8px;color:var(--txt)}
+  input:focus{outline:none;border-color:var(--acc)}
+  label{font-size:13px;color:var(--muted);display:block;margin-bottom:4px}
+  button{cursor:pointer;border:none;border-radius:8px;padding:9px 14px;
+         background:var(--acc);color:#fff;font-weight:600}
+  button:hover{filter:brightness(1.12)}
+  button.ghost{background:#262c4a;color:var(--txt);border:1px solid var(--line)}
+  button.danger{background:#b33a3a}
+  button.sm{padding:5px 10px;font-size:13px}
+  .thumbs{display:flex;gap:6px;flex-wrap:wrap;margin:8px 0 12px}
+  .thumbs img{width:64px;height:64px;object-fit:cover;border-radius:8px;
+              border:1px solid var(--line)}
+  table{width:100%;border-collapse:collapse;font-size:13.5px}
+  th,td{padding:8px 6px;text-align:left;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600;font-size:12.5px}
+  td .row{gap:6px}
+  .muted{color:var(--muted);font-size:13px}
+  .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);
+         background:#23294a;border:1px solid var(--line);color:var(--txt);
+         padding:10px 18px;border-radius:10px;opacity:0;transition:.3s;
+         pointer-events:none;z-index:9;max-width:90vw}
+  .toast.show{opacity:1}
+  .toast.err{border-color:var(--bad);color:#ffd7d7}
+  .hint{font-size:12.5px;color:var(--muted);margin-top:6px}
+  code{background:#10142a;padding:1px 6px;border-radius:5px;color:#9fc1ff}
+  .scroll{max-height:320px;overflow:auto}
+</style>
+</head>
+<body>
+<header>
+  <h1>📷 Server Nhận Diện Khuôn Mặt</h1>
+  <div class="chips">
+    <span class="chip"><span class="dot" id="camDot"></span>Camera <b id="camState">chưa bật</b></span>
+    <span class="chip">Nguồn: <b id="srcState">—</b></span>
+    <span class="chip">Đã đăng ký: <b id="stuCount">0</b></span>
+    <span class="chip">Model: <b id="modelState">—</b></span>
+  </div>
+</header>
+
+<main>
+  <!-- CỘT TRÁI: VIDEO + CẤU HÌNH -->
+  <section>
+    <div class="card">
+      <h2>Video trực tiếp (đã khoanh vùng nhận diện)</h2>
+      <div class="video">
+        <span class="badge" id="liveBadge">đang tải...</span>
+        <img id="live" src="/video_feed" alt="live">
+      </div>
+      <div class="dets" id="dets"><span class="muted">Chưa có khung hình nào được xử lý.</span></div>
+    </div>
+
+    <div class="card">
+      <h2>Kết nối camera điện thoại</h2>
+      <label>URL luồng MJPEG từ app trên điện thoại</label>
+      <div class="row" style="gap:8px">
+        <input type="text" id="streamUrl" placeholder="http://192.168.1.100:8080/video"
+               style="flex:1;margin-bottom:0">
+        <button id="btnConnect">Kết nối</button>
+        <button class="ghost" id="btnReconnect">Kết nối lại</button>
+      </div>
+      <div class="hint">
+        Cài app <b>IP Webcam</b> (Android) → Start server → dùng
+        <code>http://&lt;ip-phone&gt;:8080/video</code>.
+        Hoặc <b>DroidCam</b>: <code>http://&lt;ip-phone&gt;:4747/video</code>.
+        Điện thoại và máy tính phải cùng mạng WiFi. Webcam local: nhập <code>0</code>.
+      </div>
+      <div class="hint" id="camErr"></div>
+    </div>
+  </section>
+
+  <!-- CỘT PHẢI: ĐĂNG KÝ + DANH SÁCH -->
+  <section>
+    <div class="card">
+      <h2 id="formTitle">Đăng ký khuôn mặt mới</h2>
+      <input type="text" id="fName" placeholder="Họ và tên (VD: Nguyễn Văn A)">
+      <div class="row">
+        <div style="flex:1">
+          <label>Ngày sinh</label>
+          <input type="date" id="fDob">
+        </div>
+        <div style="flex:1">
+          <label>Lớp</label>
+          <input type="text" id="fClass" placeholder="VD: 10A1">
+        </div>
+      </div>
+      <div class="thumbs" id="thumbs"></div>
+      <div class="row">
+        <button class="ghost" id="btnCapture">📷 Chụp 1 mẫu</button>
+        <button class="ghost" id="btnCapture5">📷 Chụp 5 mẫu</button>
+        <label class="ghost" style="margin:0;padding:9px 14px;border-radius:8px;
+               background:#262c4a;border:1px solid var(--line);cursor:pointer">
+          📁 Chọn ảnh<input type="file" id="fFiles" accept="image/*" multiple hidden>
+        </label>
+      </div>
+      <div class="row" style="margin-top:12px">
+        <button id="btnSave">💾 Lưu đăng ký</button>
+        <button class="ghost" id="btnCancelEdit" style="display:none">Huỷ sửa</button>
+      </div>
+      <div class="hint">Nên chụp ≥ 5 mẫu, <b>ở nhiều khoảng cách (gần + xa)</b>, quay nhẹ đầu, ánh sáng tốt để nhận diện chính xác hơn.</div>
+    </div>
+
+    <div class="card">
+      <h2>Danh sách người đã đăng ký</h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>ID</th><th>Họ và tên</th><th>Ngày sinh</th><th>Lớp</th><th>Mẫu</th><th></th></tr></thead>
+          <tbody id="stuBody"><tr><td colspan="6" class="muted">Đang tải...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Nhật ký nhận diện</h2>
+      <div class="scroll">
+        <table>
+          <thead><tr><th>Thời gian</th><th>Họ tên</th><th>Lớp</th><th>Điểm</th></tr></thead>
+          <tbody id="logBody"><tr><td colspan="4" class="muted">Chưa có dữ liệu</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+let captured = [];      // mảng dataURL ảnh đã chụp
+let editingId = null;   // id khi đang sửa
+
+function toast(msg, isErr){
+  const t = $('toast');
+  t.textContent = msg;
+  t.className = 'toast show' + (isErr ? ' err' : '');
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.className = 'toast', 3200);
+}
+
+async function api(url, opt){
+  const r = await fetch(url, opt);
+  let data = null;
+  try { data = await r.json(); } catch(e){}
+  if(!r.ok || (data && data.ok === false))
+    throw new Error((data && data.error) || ('Lỗi ' + r.status));
+  return data;
+}
+
+/* ---------------- chụp ảnh KHUNG GỐC từ server ---------------- */
+async function grabFrame(){
+  const r = await fetch("/api/frame.jpg", {cache: "no-store"});
+  if(!r.ok) throw new Error("Chưa có khung hình từ camera — chờ camera chạy rồi chụp lại");
+  const blob = await r.blob();
+  if(!blob.size) throw new Error("Khung hình rỗng");
+  return await new Promise((resolve, reject) => {
+    const rd = new FileReader();
+    rd.onload = () => resolve(rd.result);
+    rd.onerror = () => reject(new Error("Không đọc được khung hình"));
+    rd.readAsDataURL(blob);
+  });
+}
+
+/* Kiểm tra ngay ảnh vừa chụp có thấy khuôn mặt không */
+async function checkFace(dataUrl){
+  try{
+    const d = await api("/api/recognize", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({images: [dataUrl]})
+    });
+    if(!d.results.length){
+      toast("⚠ Trong ảnh KHÔNG thấy khuôn mặt — đưa sát mặt vào khung, đủ ánh sáng rồi chụp lại", true);
+      return false;
+    }
+    toast(`✓ Thấy ${d.results.length} khuôn mặt trong ảnh`);
+    return true;
+  }catch(e){ return true; }
+}
+
+function renderThumbs(){
+  $('thumbs').innerHTML = captured.map(u =>
+    `<img src="${u}" onclick="window._rmThumb(this)" title="Bấm để xoá">`).join('');
+}
+window._rmThumb = el => { captured = captured.filter(u => u !== el.src); renderThumbs(); };
+
+async function captureOne(){
+  try{
+    const img = await grabFrame();
+    captured.push(img); renderThumbs();
+    await checkFace(img);
+  }catch(e){ toast(e.message, true); }
+}
+$('btnCapture').onclick = captureOne;
+$('btnCapture5').onclick = async () => {
+  try{
+    for(let i = 0; i < 5; i++){
+      captured.push(await grabFrame()); renderThumbs();
+      await new Promise(r => setTimeout(r, 500));
+    }
+    toast("Đã chụp 5 mẫu");
+    await checkFace(captured[captured.length - 1]);
+  }catch(e){ toast(e.message, true); }
+};
+$('fFiles').onchange = e => {
+  for(const f of e.target.files){
+    const rd = new FileReader();
+    rd.onload = () => { captured.push(rd.result); renderThumbs(); };
+    rd.readAsDataURL(f);
+  }
+  e.target.value = '';
+};
+
+/* ---------------- lưu / sửa ---------------- */
+$('btnSave').onclick = async () => {
+  const payload = {
+    full_name: $('fName').value.trim(),
+    date_of_birth: $('fDob').value,
+    class_name: $('fClass').value.trim(),
+    images: captured
+  };
+  if(!payload.full_name) return toast('Thiếu họ và tên', true);
+  if(!payload.date_of_birth) return toast('Thiếu ngày sinh', true);
+  if(!payload.class_name) return toast('Thiếu lớp', true);
+  if(!editingId && !captured.length) return toast('Chưa có ảnh mẫu', true);
+  try{
+    if(editingId){
+      await api('/api/students/' + editingId, {
+        method:'PUT', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+      });
+      if(captured.length){
+        await api('/api/students/' + editingId + '/samples', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({images: captured})
+        });
+      }
+      toast('Đã cập nhật');
+    }else{
+      const d = await api('/api/students', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+      });
+      toast(`Đã đăng ký (id ${d.id}, ${d.samples} mẫu)`);
+    }
+    resetForm(); await loadStudents();
+  }catch(e){ toast(e.message, true); }
+};
+
+function resetForm(){
+  editingId = null; captured = [];
+  $('fName').value = ''; $('fDob').value = ''; $('fClass').value = '';
+  $('formTitle').textContent = 'Đăng ký khuôn mặt mới';
+  $('btnSave').textContent = '💾 Lưu đăng ký';
+  $('btnCancelEdit').style.display = 'none';
+  renderThumbs();
+}
+$('btnCancelEdit').onclick = resetForm;
+
+/* ---------------- danh sách ---------------- */
+async function loadStudents(){
+  const d = await api('/api/students');
+  $('stuCount').textContent = d.students.length;
+  if(!d.students.length){
+    $('stuBody').innerHTML = '<tr><td colspan="6" class="muted">Chưa có ai đăng ký</td></tr>';
+    return;
+  }
+  $('stuBody').innerHTML = d.students.map(s => `
+    <tr>
+      <td>${s.id}</td>
+      <td><b>${s.full_name}</b></td>
+      <td>${s.date_of_birth}</td>
+      <td>${s.class_name}</td>
+      <td>${s.samples}</td>
+      <td><div class="row">
+        <button class="sm ghost" onclick="editStudent(${s.id})">Sửa</button>
+        <button class="sm ghost" onclick="addSamples(${s.id})">+Mẫu</button>
+        <button class="sm danger" onclick="delStudent(${s.id})">Xoá</button>
+      </div></td>
+    </tr>`).join('');
+}
+
+async function editStudent(id){
+  const d = await api('/api/students/' + id);
+  editingId = id;
+  $('fName').value = d.student.full_name;
+  $('fDob').value = d.student.date_of_birth;
+  $('fClass').value = d.student.class_name;
+  captured = []; renderThumbs();
+  $('formTitle').textContent = 'Sửa người #' + id + ' (bấm "+Mẫu" để thêm ảnh)';
+  $('btnSave').textContent = '💾 Cập nhật';
+  $('btnCancelEdit').style.display = '';
+  window.scrollTo({top:0, behavior:'smooth'});
+}
+
+async function addSamples(id){
+  try{
+    const imgs = [];
+    for(let i = 0; i < 3; i++){ imgs.push(await grabFrame()); await new Promise(r => setTimeout(r, 500)); }
+    const d = await api(`/api/students/${id}/samples`, {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({images: imgs})
+    });
+    toast(`Đã thêm ${d.added} mẫu cho #${id}`);
+    await loadStudents();
+  }catch(e){ toast(e.message, true); }
+}
+
+async function delStudent(id){
+  if(!confirm('Xoá người #' + id + '? Hành động này không thể hoàn tác.')) return;
+  try{ await api('/api/students/' + id, {method:'DELETE'}); toast('Đã xoá'); await loadStudents(); }
+  catch(e){ toast(e.message, true); }
+}
+
+/* ---------------- cấu hình camera ---------------- */
+async function connect(restart){
+  try{
+    const url = $('streamUrl').value.trim();
+    await api('/api/config', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({stream_url: url, restart: restart})
+    });
+    toast(restart ? 'Đang kết nối lại...' : 'Đã lưu cấu hình, đang kết nối...');
+  }catch(e){ toast(e.message, true); }
+}
+$('btnConnect').onclick = () => connect(false);
+$('btnReconnect').onclick = () => connect(true);
+
+/* ---------------- trạng thái định kỳ ---------------- */
+async function pollStatus(){
+  try{
+    const d = await api('/api/status');
+    const cam = d.camera;
+    $('camDot').className = 'dot' + (cam.connected ? ' on' : '');
+    $('camState').textContent = cam.connected
+      ? `đang chạy (${cam.fps || '?'} fps${cam.resolution ? ', ' + cam.resolution : ''})`
+      : (cam.url ? 'mất kết nối' : 'chưa bật');
+    $('camErr').textContent = cam.error ? ('⚠ ' + cam.error) : '';
+    $('streamUrl').value = cam.url || $('streamUrl').value;
+    const src = {phone:'📷 Điện thoại', esp32:'🔌 ESP32'}[d.frame_source] || 'không có';
+    $('srcState').textContent = src;
+    $('modelState').textContent = d.trained
+      ? `nhận dạng (${d.students} người, ngưỡng ${d.threshold})`
+      : 'chưa có mẫu';
+    $('stuCount').textContent = d.students;
+    $('liveBadge').textContent = d.frame_source !== 'none'
+      ? `đang xử lý (${d.frame_age}s)` : 'chờ tín hiệu';
+
+    const box = $('dets');
+    if(!d.results.length){
+      box.innerHTML = '<span class="muted">' +
+        (d.frame_source !== 'none' ? 'Không thấy khuôn mặt trong khung.' :
+         'Chưa có khung hình nào được xử lý.') + '</span>';
+    }else{
+      box.innerHTML = d.results.map(r => r.match
+        ? `<span class="det">✅ <b>${r.full_name}</b> · ${r.class_name} · ${r.date_of_birth}
+             <small>(điểm ${r.confidence})</small></span>`
+        : `<span class="det">❓ Chưa nhận diện <small>(điểm ${r.confidence})</small></span>`
+      ).join('');
+    }
+  }catch(e){ /* bỏ qua lỗi tạm thời */ }
+}
+
+async function pollLog(){
+  try{
+    const d = await api('/api/log?limit=25');
+    if(!d.log.length) return;
+    $('logBody').innerHTML = d.log.map(l => `
+      <tr><td>${l.seen_at}</td><td>${l.full_name}</td>
+      <td>${l.class_name || ''}</td><td>${l.confidence ?? ''}</td></tr>`).join('');
+  }catch(e){}
+}
+
+/* ---------------- khởi động ---------------- */
+(async function init(){
+  try{
+    const c = await api('/api/config');
+    if(c.stream_url) $('streamUrl').value = c.stream_url;
+  }catch(e){}
+  await loadStudents();
+  pollStatus(); pollLog();
+  setInterval(pollStatus, 1500);
+  setInterval(pollLog, 5000);
+  setInterval(loadStudents, 15000);
+})();
+</script>
+</body>
+</html>
