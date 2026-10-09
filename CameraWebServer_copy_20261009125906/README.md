@@ -45,10 +45,15 @@ nút bấm → chụp 1 ảnh → POST lên server điểm danh → LED báo k�
 
 | Mẫu nháy | Ý nghĩa |
 |---|---|
+| **Sáng cố định ~1,5 s khi boot** | Firmware đã chạy, sẵn sàng (khác mọi mẫu nháy kết quả) |
 | **1 nháy dài ~800 ms** | Điểm danh OK — log Serial in `[BTN] Diem danh OK: <họ tên>` |
 | **2 nháy vừa ~300 ms** | Đã nhận diện được nhưng **đã điểm danh rồi** trong buổi này (`already:true`) |
 | **3 nháy ngắn ~120 ms** | Không thấy mặt / không khớp ai (`matched:0`) |
-| **5 nháy nhanh ~60 ms** | Lỗi mạng / lỗi server (connect fail hoặc HTTP != 2xx) |
+| **5 nháy nhanh ~60 ms** | Lỗi mạng / lỗi server (connect fail, HTTP != 2xx, **hoặc WiFi chưa kết nối**) |
+
+> **WiFi chưa lên thì sau 20 s firmware vẫn chạy tiếp** (không treo trong setup):
+> web `:80` mở, nút nhấn vẫn hoạt động — bấm nút lúc này sẽ nháy **5 lần** (loi mang).
+> Kiểm tra `ssid`/`password` trong `.ino` và xem log Serial để biết WiFi có lên không.
 
 Phản hồi server (HTTP 200, JSON top-level ASCII):
 

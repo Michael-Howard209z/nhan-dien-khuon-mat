@@ -725,6 +725,13 @@ static void doButtonCapture() {
 
   Serial.println("[BTN] nhan nut -> chup 1 anh, POST len server");
 
+  // WiFi chua len -> bao ngay bang 5 nhanh (khong can day cam, khong ton pin)
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("[BTN] loi mang: WiFi CHUA ket noi duoc (kiem tra ssid/password) -> 5 nhanh");
+    btnBlink(5, 60, 60);
+    return;
+  }
+
   if (!camWake()) {
     Serial.println("[BTN] loi: khong day duoc camera");
     btnBlink(5, 60, 60);
@@ -858,12 +865,27 @@ void setup() {
   WiFi.setTxPower(WIFI_POWER_19_5dBm);      // phat cong suat toi da -> song WiFi khoe hon
 
   Serial.print("WiFi connecting");
-  while (WiFi.status() != WL_CONNECTED) {
+  uint32_t wifi_t0 = millis();
+  while (WiFi.status() != WL_CONNECTED && (millis() - wifi_t0) < 20000) {
     delay(500);
     Serial.print(".");
   }
   Serial.println("");
-  Serial.println("WiFi connected");
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("WiFi connected");
+  } else {
+    // KHONG de setup treo vo han: treo = web khong mo, nut nhan khong chay,
+    // LED khong am bao -> rat kho doan. Chay tiep: nut van hoat dong, POST
+    // loi se bao 5 nhanh; WiFi tu ket noi lai khi nao duoc (setAutoReconnect).
+    Serial.println("\n[BTN] WiFi CHUA ket noi sau 20s -> van chay tiep (nut + web).");
+    Serial.println("[BTN] Kiem tra ssid/password trong .ino; bam nut luc nay se nhap 5 lan (loi mang).");
+  }
+
+  // Bao hieu "firmware da chay": LED sang co dinh ~1.5s khi boot xong.
+  // (Khac moi mau nhap ket qua -> nhanh nhanh biet board song, kể cả khi chua co WiFi.)
+  btnLed(true);
+  delay(1500);
+  btnLed(false);
 
   startCameraServer();
 
