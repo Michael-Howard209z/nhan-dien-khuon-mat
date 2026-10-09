@@ -837,6 +837,9 @@ void setup() {
 #if BUTTON_ENABLE
   pinMode(BUTTON_PIN, INPUT_PULLUP);   // nut nhan: GPIO13 -> GND, nhan xuong = muc THAP
   digitalWrite(BUTTON_PIN, HIGH);      // dam bao muc cao khi INPUT_PULLUP khong ho tro
+  // Chan doan: in trang thai nghi cua chan nut khi boot
+  Serial.printf("[BTN] GPIO13 nghi = %s (phai HIGH; neu LOW -> bi keo xuong / noi sai)\n",
+                digitalRead(BUTTON_PIN) == LOW ? "LOW" : "HIGH");
 #endif
 
 #if BUTTON_ENABLE
@@ -914,6 +917,14 @@ void setup() {
 
 void loop() {
 #if BUTTON_ENABLE
+  // Chan doan: in ra moi khi trang thai chan nut DOI (nhan/nha) -> kiem tra wiring
+  static bool last_raw = false;
+  bool raw_now = (digitalRead(BUTTON_PIN) == LOW);
+  if (raw_now != last_raw) {
+    last_raw = raw_now;
+    Serial.printf("[BTN] GPIO13 -> %s\n", raw_now ? "LOW (dang nhan)" : "HIGH (nha nut)");
+  }
+
   buttonPoll();   // nhan nut -> chup 1 anh + POST (block luc do la giao dich 1 lan)
 
   // Tat cam sau CAM_OFF_DELAY_MS; neu stream dang chay thi giu yeu cau va thu lai
