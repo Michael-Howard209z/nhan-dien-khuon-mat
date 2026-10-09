@@ -1,0 +1,113 @@
+# ESP32-CAM + Server nhận diện khuôn mặt (Python)
+
+Thư mục này là firmware ESP32-CAM đã tích hợp sẵn với server Python ở thư mục gốc
+(`server.py`). Gồm mẫu `CameraWebServer` của Espressif + **chế độ nút nhấn** (mặc định):
+nút bấm → chụp 1 ảnh → POST lên server điểm danh → LED báo kết quả → tắt camera.
+
+## 1. Chế độ hoạt động (chọn 1 trong 3)
+
+| Chế độ | ESP32 (`.ino`) | Server (`.env` / web) | Khi nào dùng |
+|---|---|---|---|
+| **BUTTON — nút nhấn (mặc định)** | `BUTTON_ENABLE = 1` | Không cần `STREAM_URL`; ESP32 POST `PUSH_URL?capture=1` mỗi lần bấm | Chạy thật: 1 nút = 1 lần chấm công, cam OFF khi nghỉ |
+| **PULL** | `BUTTON_ENABLE = 0`, `PUSH_ENABLE = 0` | `STREAM_URL = http://<ip-esp32>:81/stream` | Test nhanh 1 cam, không sửa firmware nhiều |
+| **PUSH** (liên tục) | `BUTTON_ENABLE = 0`, `PUSH_ENABLE = 1`, `PUSH_MODE_MJPEG = 0`, `PUSH_URL = http://<ip-may>:5001/api/esp32/frame` | Không cần `STREAM_URL` | Nhiều cam, NAT, hoặc muốn cam chủ động đẩy liên tục |
+
+- `<ip-esp32>`: xem trên Serial Monitor sau khi nạp (baud 115200). Web ở `:80`, stream ở `:81`.
+- `<ip-may>`: IP máy chạy `python server.py` (cùng WiFi với ESP32). `:5001` = `CAMERA_PORT` trong `.env`.
+- Khi `BUTTON_ENABLE = 1`, `PUSH_ENABLE` **bị tự động tắt** (không có task push liên tục,
+  không stream nội bộ tự chạy) — đúng yêu cầu để chip không bị "đói" tài nguyên.
+
+## 2. Chế độ nút nhấn (BUTTON) — đấu nối & hoạt động
+
+### Đấu nối
+
+- **Nút nhấn**: một đầu vào **GPIO13**, đầu còn lại nối **GND**.
+  Firmware cấu hình `INPUT_PULLUP`, kích **mức THẤP** (nhả = HIGH, nhấn = LOW), debounce 30 ms.
+  - *Sao không dùng GPIO12 (MTDI):* strapping pin — nút kéo LOW lúc boot sẽ đổi điện áp
+    điều khiển SPIRAM (1.8V) → boot lỗi / mất PSRAM.
+  - *Sao không dùng GPIO16/17:* đường PSRAM của ESP32-CAM. *GPIO4:* đã dùng cho flash.
+    *GPIO0:* strapping boot mode (kéo LOW = vào chế độ nạp). *GPIO1/3:* UART.
+- **LED báo kết quả**: dùng **flash LED GPIO4** (AI Thinker); nếu board không có
+  `LED_GPIO_NUM` thì dùng đèn đỏ status **GPIO33**.
+- Nút và server phải ở trạng thái bình thường; nút chỉ có tác dụng khi ESP32 đã kết nối WiFi
+  (firmware kết nối WiFi ngay khi boot, có vòng lặp chờ).
+
+### Luồng 1 lần bấm
+
+1. `camWake()` — bật nguồn sensor (PWDN GPIO32 = LOW) + `esp_camera_init` (nếu đang OFF).
+2. Bật flash → chờ 250 ms (sensor cần LED sáng trước khi bấm) → chụp **1 JPEG** → tắt flash.
+3. `POST PUSH_URL?capture=1` — multipart/form-data, field `file`, boundary `esp32cam`
+   (cùng đúng định dạng `push_post_frame()` cũ).
+4. Đọc body JSON phản hồi, nháy LED theo kết quả + in log Serial (ASCII).
+5. Giữ cam bật thêm `CAM_OFF_DELAY_MS` (1500 ms) rồi `esp_camera_deinit` + PWDN = HIGH (tắt sensor).
+
+### Ý nghĩa nháy LED (sau mỗi lần bấm)
+
+| Mẫu nháy | Ý nghĩa |
+|---|---|
+| **1 nháy dài ~800 ms** | Điểm danh OK — log Serial in `[BTN] Diem danh OK: <họ tên>` |
+| **2 nháy vừa ~300 ms** | Đã nhận diện được nhưng **đã điểm danh rồi** trong buổi này (`already:true`) |
+| **3 nháy ngắn ~120 ms** | Không thấy mặt / không khớp ai (`matched:0`) |
+| **5 nháy nhanh ~60 ms** | Lỗi mạng / lỗi server (connect fail hoặc HTTP != 2xx) |
+
+Phản hồi server (HTTP 200, JSON top-level ASCII):
+
+```json
+{"ok":true,"matched":1,"already":false,"full_name":"Nguyen Van A", ...}   // -> 1 nháy dài
+{"ok":true,"matched":1,"already":true, ...}                               // -> 2 nháy
+{"ok":true,"matched":0,"already":false,"full_name":"", "count":0, ...}    // -> 3 nháy
+```
+
+## 3. Web điều khiển (`:80`) — dành cho developer
+
+Web server trên cổng 80 **vẫn chạy** trong chế độ nút nhấn để cấu hình camera:
+
+- `/` — trang cấu hình (độ phân giải, chất lượng, flash, xoay ảnh).
+- `/status` — JSON trạng thái; ngoài các trường cũ thêm `"cam_on":0|1` (sensor có đang bật)
+  và `"button":<GPIO>` (13, hoặc -1 nếu tắt chế độ nút). Khi cam đang OFF, `/status`
+  trả JSON tối giản (`cam_on:0`) nhưng trang web vẫn đọc được.
+- `/control?var=...&val=...` — chỉnh sensor (trả 503 nếu cam đang tắt).
+- `/flash?state=1|0` — bật/tắt đèn flash.
+- `/capture` — chụp 1 ảnh JPEG (tự `camWake()` nếu cam đang OFF; lỗi thì trả 503).
+- `/stream` (cổng 81) — stream MJPEG; **tự bật cam** khi có người mở, và trong lúc stream
+  chạy thì `camSleep()` sẽ **từ không cho tắt** (tránh deinit giữa khung hình).
+- **`GET /live?state=1`** → bật cam; **`GET /live?state=0`** → tắt cam.
+  Trả `{"ok":1,"cam":0|1}` — dùng cho panel debug của server Python.
+
+## 4. Cấu hình khuyến dùng cho nhận diện
+
+- Độ phân giải: **VGA 640×480** (nhận xa hơn). Mặc định firmware là QVGA 320×240
+  (siêu mượt) — chế độ nút nhấn chỉ chụp 1 ảnh/lần nên dư sức chạy VGA.
+- Chất lượng JPEG: `12` (10 = nét, 20+ = nhẹ/nhanh).
+- Server: có thể hạ `MIN_FACE_SIZE` xuống `24–32` nếu mặt vẫn nhỏ, tăng `DETECT_SCORE`
+  nếu nhiều báo giả.
+- `PUSH_MODE_MJPEG = 0` cho server Flask (mỗi khung 1 POST field `file`).
+  `= 1` (luồng MJPEG chunked) chỉ dùng khi server hiểu MJPEG push — Flask dễ treo.
+
+## 5. Quay lại hành vi cũ / tắt các tính năng mới
+
+- `BUTTON_ENABLE = 0` → hết chế độ nút nhấn; `loop()` trở về `delay(10000)` như cũ,
+  cam được init ngay khi boot, `/live` vẫn hoạt động.
+- `PUSH_ENABLE = 1` (và `BUTTON_ENABLE = 0`) → bật lại task PUSH liên tục như cũ
+  (PUSH_MODE_MJPEG = 0 POST từng khung, = 1 đẩy luồng MJPEG).
+- `PUSH_ENABLE = 0` + `BUTTON_ENABLE = 0` → PULL (server kéo `:81/stream`).
+- `CAM_OFF_DELAY_MS` — thời gian giữ cam sau khi gửi xong (mặc định 1500 ms).
+- `BUTTON_PIN` — GPIO của nút (mặc định 13, kéo nội lên, kích mức thấp).
+
+## 6. Nạp firmware
+
+1. Arduino IDE / arduino-cli: board `AI Thinker ESP32-CAM` (PSRAM Enabled), partition `custom` (có `partitions.csv`).
+2. Sửa `ssid` / `password`, `PUSH_URL` trong `.ino`.
+3. Nạp, mở Serial 115200 lấy IP, mở `http://<ip-esp32>/` để chỉnh flash / độ phân giải / xoay.
+4. Kiểm tra: bấm nút → log Serial `[BTN] Diem danh OK: ...` + LED nháy 1 lần dài;
+   server nhận `POST /api/esp32/frame?capture=1`.
+
+## 7. File trong thư mục
+
+- `CameraWebServer_copy_*.ino` — cấu hình WiFi/PUSH/BUTTON, `camWake()`/`camSleep()`,
+  vòng lặp poll nút nhấn + POST 1 ảnh (nháy LED phản hồi).
+- `app_httpd.cpp` — web `:80` + stream `:81/stream` + `/capture` + `/status`
+  (có `push`, `push_ok`, `push_err`, `cam_on`, `button`) + `/live?state=0|1`,
+  tự `camWake()` khi mở `/capture`, `/stream`, `/bmp`.
+- `board_config.h` / `camera_pins.h` — chọn `CAMERA_MODEL_AI_THINKER`.
+- `partitions.csv`, `ci.json` — cấu hình build.

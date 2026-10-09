@@ -1,0 +1,24 @@
+# --- Cấu hình riêng của máy này: có mật khẩu quản trị + khoá cookie đăng nhập ---
+.env
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# --- Dữ liệu chạy: model tải về, DB và mẫu ảnh khuôn mặt ---
+# (đều được tạo lại tự động, không commit lên git)
+data/
+
+# --- Ảnh nhật ký từ các script kiểm tra ---
+out_*.jpg
+
+# --- Log ---
+*.log
+
+# --- Nhị phân công cụ lạ vô tình nằm trong thư mục dự án ---
+opencode.exe
+# --- Trang thai phat trien / ban sao cu (khong commit) ---
+.opencode/
+backup-*/
