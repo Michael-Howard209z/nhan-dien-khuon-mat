@@ -13,6 +13,7 @@
 // limitations under the License.
 #include "esp_http_server.h"
 #include "esp_timer.h"
+#include "esp_system.h"      // esp_restart() khi luu cau hinh mang xong
 #include "esp_camera.h"
 #include "img_converters.h"
 #include "fb_gfx.h"
@@ -20,7 +21,10 @@
 #include "sdkconfig.h"
 #include "camera_index.h"
 #include "board_config.h"
+#include "app_config.h"     // cau hinh persistent (NVS) cho che do AP cau hinh
+#include "setup_page.h"     // trang /setup
 
+#include <WiFi.h>
 #include <lwip/sockets.h>
 #include <lwip/tcp.h>
 
@@ -1007,6 +1011,12 @@ static const char INDEX_HTML[] = R"HTMLDOC(
 static esp_err_t index_handler(httpd_req_t *req) {
   httpd_resp_set_type(req, "text/html");
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  // Dang o che do AP cau hinh -> trang goc cung la trang cau hinh
+  // (dien thoai captive portal thuong mo chinh http://192.168.4.1/)
+  if (cfg_setup_mode) {
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, SETUP_HTML, strlen(SETUP_HTML));
+  }
   return httpd_resp_send(req, INDEX_HTML, strlen(INDEX_HTML));
 }
 
@@ -1029,9 +1039,246 @@ static esp_err_t advanced_handler(httpd_req_t *req) {
   }
 }
 
+// ============================================================================
+//  TRANG CAU HINH + API (che do AP khi khong ket noi duoc WiFi)
+//     GET  /setup       -> trang cau hinh (setup_page.h)
+//     GET  /api/cfg     -> JSON cau hinh hien tai + trang thai mang
+//     POST /api/cfg     -> luu cau hinh (body: key=urlencoded value&...)
+//     GET  /api/scan    -> quet WiFi, tra ve danh sach SSID
+//     cac endpoint captive portal -> dua dien thoai ve /setup khi dang o AP
+// ============================================================================
+
+// Chuyen chuoi sang dang an cho JSON (thoat " va \, bo ky tu dieu khien)
+static void json_escape(const char *src, char *dst, size_t dst_sz) {
+  size_t j = 0;
+  for (size_t i = 0; src[i] != 0 && j + 2 < dst_sz; i++) {
+    unsigned char c = (unsigned char)src[i];
+    if (c == '"' || c == '\\') {
+      if (j + 3 >= dst_sz) break;
+      dst[j++] = '\\';
+      dst[j++] = (char)c;
+    } else if (c >= 0x20) {
+      dst[j++] = (char)c;
+    }
+  }
+  dst[j] = 0;
+}
+
+// Gui trang cau hinh
+static esp_err_t setup_handler(httpd_req_t *req) {
+  httpd_resp_set_type(req, "text/html");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  return httpd_resp_send(req, SETUP_HTML, strlen(SETUP_HTML));
+}
+
+// Cac endpoint "captive portal" ma dien thoai dung de kiem tra mang:
+// dang o che do AP -> dua ve /setup de trinh duyet tu mo trang cau hinh.
+static esp_err_t captive_handler(httpd_req_t *req) {
+  if (!cfg_setup_mode) {
+    return httpd_resp_send_404(req);   // dang STA binh thuong -> khong cham vao
+  }
+  httpd_resp_set_status(req, "302 Found");
+  httpd_resp_set_hdr(req, "Location", "/setup");
+  return httpd_resp_send(req, NULL, 0);
+}
+
+// ---- GET /api/cfg -> JSON cau hinh hien tai ----
+static esp_err_t cfg_get_handler(httpd_req_t *req) {
+  char e_ssid[80], e_apssid[80], e_appass[80], e_url[160];
+  char e_ip[48], e_gw[48], e_mask[48], e_dns[48];
+  json_escape(cfg.wifi_ssid, e_ssid, sizeof(e_ssid));
+  json_escape(cfg.ap_ssid, e_apssid, sizeof(e_apssid));
+  json_escape(cfg.ap_pass, e_appass, sizeof(e_appass));
+  json_escape(cfg.push_url, e_url, sizeof(e_url));
+  json_escape(cfg.static_ip, e_ip, sizeof(e_ip));
+  json_escape(cfg.static_gw, e_gw, sizeof(e_gw));
+  json_escape(cfg.static_mask, e_mask, sizeof(e_mask));
+  json_escape(cfg.static_dns, e_dns, sizeof(e_dns));
+
+  String ip = cfg_setup_mode ? WiFi.softAPIP().toString() : WiFi.localIP().toString();
+  int rssi = (WiFi.status() == WL_CONNECTED) ? (int)WiFi.RSSI() : 0;
+
+  static char out[1024];
+  int n = snprintf(out, sizeof(out),
+                   "{\"ok\":1,\"setup_mode\":%d,"
+                   "\"wifi\":{\"ssid\":\"%s\",\"pass_set\":%d},"
+                   "\"static\":{\"use\":%d,\"ip\":\"%s\",\"gw\":\"%s\",\"mask\":\"%s\",\"dns\":\"%s\"},"
+                   "\"push_url\":\"%s\","
+                   "\"cam\":{\"vflip\":%d,\"hmirror\":%d},"
+                   "\"ap\":{\"ssid\":\"%s\",\"pass\":\"%s\"},"
+                   "\"net\":{\"ip\":\"%s\",\"rssi\":%d}}",
+                   cfg_setup_mode ? 1 : 0,
+                   e_ssid, cfg.wifi_pass[0] ? 1 : 0,
+                   cfg.use_static_ip, e_ip, e_gw, e_mask, e_dns,
+                   e_url,
+                   cfg.vflip, cfg.hmirror,
+                   e_apssid, e_appass,
+                   ip.c_str(), rssi);
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  if (n >= (int)sizeof(out)) n = sizeof(out) - 1;   // snprintf tra ve do dai "se viet het"
+  return httpd_resp_send(req, out, n);
+}
+
+// ---- GET /api/scan -> quet WiFi (chan luong ~2-3s, chap nhan duoc) ----
+static esp_err_t scan_handler(httpd_req_t *req) {
+  static char out[1024];
+  int found = WiFi.scanNetworks();
+  int pos = snprintf(out, sizeof(out), "{\"ok\":1,\"list\":[");
+  int cnt = 0;
+  for (int i = 0; i < found; i++) {
+    char se[64];
+    json_escape(WiFi.SSID(i).c_str(), se, sizeof(se));
+    if (se[0] == '\0') continue;   // bo qua mang an ten
+    int w = snprintf(out + pos, sizeof(out) - pos,
+                     "%s{\"ssid\":\"%s\",\"rssi\":%d,\"secure\":%d}",
+                     cnt ? "," : "", se, (int)WiFi.RSSI(i),
+                     WiFi.encryptionType(i) != WIFI_AUTH_OPEN ? 1 : 0);
+    if (w <= 0 || pos + w >= (int)sizeof(out) - 2) break;
+    pos += w;
+    cnt++;
+  }
+  snprintf(out + pos, sizeof(out) - pos, "]}");
+  WiFi.scanDelete();
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  return httpd_resp_send(req, out, strlen(out));
+}
+
+// ---- POST /api/cfg: nhan body "key=value&..." -> luu vao NVS ----
+static int hex_val(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+// Giai ma URL (%XX va '+') tai cho
+static void url_decode(char *s) {
+  char *o = s;
+  while (*s) {
+    if (*s == '+') { *o++ = ' '; s++; }
+    else if (*s == '%' && hex_val(s[1]) >= 0 && hex_val(s[2]) >= 0) {
+      *o++ = (char)(hex_val(s[1]) * 16 + hex_val(s[2]));
+      s += 3;
+    } else { *o++ = *s++; }
+  }
+  *o = 0;
+}
+
+// Lay gia tri khoa "key" trong body "a=1&b=2" -> out (da decode)
+static bool form_get(const char *body, const char *key, char *out, size_t out_sz) {
+  size_t klen = strlen(key);
+  const char *p = body;
+  while (p && *p) {
+    const char *amp = strchr(p, '&');
+    const char *eq = strchr(p, '=');
+    if (!eq || (amp && amp < eq)) { p = amp ? amp + 1 : NULL; continue; }
+    if (!amp) amp = eq + strlen(eq);
+    if ((size_t)(eq - p) == klen && strncmp(p, key, klen) == 0) {
+      const char *vs = eq + 1;
+      size_t n = (size_t)(amp - vs);
+      if (n >= out_sz) n = out_sz - 1;
+      memcpy(out, vs, n);
+      out[n] = 0;
+      url_decode(out);
+      return true;
+    }
+    p = (*amp) ? amp + 1 : NULL;
+  }
+  out[0] = 0;
+  return false;
+}
+
+// Khoi dong lai sau khi da gui xong response (khong restart khi dang gui HTTP)
+static void cfg_reboot_task(void *arg) {
+  (void)arg;
+  vTaskDelay(pdMS_TO_TICKS(1500));
+  esp_restart();
+  vTaskDelete(NULL);
+}
+
+// Gan vao dst neu khac gia tri hien tai -> tra ve true = thay doi (can reboot)
+static bool cfg_set_str(char *dst, size_t dst_sz, const char *v) {
+  if (strcmp(dst, v) == 0) return false;
+  strlcpy(dst, v, dst_sz);
+  return true;
+}
+
+static esp_err_t cfg_post_handler(httpd_req_t *req) {
+  size_t total = req->content_len;
+  if (total == 0 || total > 2048) return httpd_resp_send_500(req);
+  char *buf = (char *)malloc(total + 1);
+  if (!buf) return httpd_resp_send_500(req);
+  size_t got = 0;
+  while (got < total) {
+    int r = httpd_req_recv(req, buf + got, total - got);
+    if (r <= 0) { free(buf); return httpd_resp_send_500(req); }  // timeout/ngat
+    got += r;
+  }
+  buf[total] = 0;
+
+  char v[160];
+  char resp[56];
+  int resp_n;
+
+  // Khoi phuc mac dinh -> xoa NVS + reboot
+  if (form_get(buf, "reset", v, sizeof(v))) {
+    free(buf);
+    cfg_reset();
+    httpd_resp_set_type(req, "application/json");
+    resp_n = snprintf(resp, sizeof(resp), "{\"ok\":1,\"reboot\":1}");
+    esp_err_t e = httpd_resp_send(req, resp, resp_n);
+    xTaskCreate(cfg_reboot_task, "cfg_reboot", 2048, NULL, 5, NULL);
+    return e;
+  }
+
+  bool net_changed = false;   // doi mang/IP/AP -> can reboot moi co hieu luc
+  bool cam_changed = false;   // doi huong camera -> ap dung ngay duoc
+
+  // Chi danh doi la khi gia tri THUC SU khac -> khong reboot vo nghia khi
+  // nguoi dung chi sua huong camera/URL server.
+  if (form_get(buf, "wifi_ssid", v, sizeof(v))) net_changed |= cfg_set_str(cfg.wifi_ssid, sizeof(cfg.wifi_ssid), v);
+  if (form_get(buf, "wifi_pass", v, sizeof(v))) net_changed |= cfg_set_str(cfg.wifi_pass, sizeof(cfg.wifi_pass), v);
+  if (form_get(buf, "use_static_ip", v, sizeof(v))) {
+    uint8_t us = (v[0] == '1') ? 1 : 0;
+    if (cfg.use_static_ip != us) { cfg.use_static_ip = us; net_changed = true; }
+  }
+  if (form_get(buf, "static_ip", v, sizeof(v))) net_changed |= cfg_set_str(cfg.static_ip, sizeof(cfg.static_ip), v);
+  if (form_get(buf, "static_gw", v, sizeof(v))) net_changed |= cfg_set_str(cfg.static_gw, sizeof(cfg.static_gw), v);
+  if (form_get(buf, "static_mask", v, sizeof(v))) net_changed |= cfg_set_str(cfg.static_mask, sizeof(cfg.static_mask), v);
+  if (form_get(buf, "static_dns", v, sizeof(v))) net_changed |= cfg_set_str(cfg.static_dns, sizeof(cfg.static_dns), v);
+  if (form_get(buf, "push_url", v, sizeof(v)) && v[0] != '\0') {
+    cfg_set_str(cfg.push_url, sizeof(cfg.push_url), v);   // hieu luc ngay (nut nhan doc lai moi lan chup)
+  }
+  if (form_get(buf, "vflip", v, sizeof(v))) { cfg.vflip = (int8_t)atoi(v); cam_changed = true; }
+  if (form_get(buf, "hmirror", v, sizeof(v))) { cfg.hmirror = (int8_t)atoi(v); cam_changed = true; }
+  if (form_get(buf, "ap_ssid", v, sizeof(v))) net_changed |= cfg_set_str(cfg.ap_ssid, sizeof(cfg.ap_ssid), v);
+  if (form_get(buf, "ap_pass", v, sizeof(v))) net_changed |= cfg_set_str(cfg.ap_pass, sizeof(cfg.ap_pass), v);
+  free(buf);
+
+  cfg_save();
+
+  // Ap dung huong camera NGAY (neu cam dang bat) -> mo lai /stream la thay ket qua
+  if (cam_changed) {
+    sensor_t *s = esp_camera_sensor_get();
+    if (s != NULL) {
+      if (cfg.vflip >= 0) s->set_vflip(s, cfg.vflip);
+      if (cfg.hmirror >= 0) s->set_hmirror(s, cfg.hmirror);
+    }
+  }
+
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  resp_n = snprintf(resp, sizeof(resp), "{\"ok\":1,\"reboot\":%d}", net_changed ? 1 : 0);
+  esp_err_t e = httpd_resp_send(req, resp, resp_n);
+  if (net_changed) xTaskCreate(cfg_reboot_task, "cfg_reboot", 2048, NULL, 5, NULL);
+  return e;
+}
+
 void startCameraServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 16;
+  config.max_uri_handlers = 26;         // 13 (goc) + /setup + /api/cfg x2 + /api/scan + 5 captive
   config.max_open_sockets = 4;          // 4 (thay vi 7): moi viewer them 1 fb_get tranh nhau
                                         // -> gioi han client de stream muot, LRU tu dong da client cu
   config.lru_purge_enable = true;       // tu dong dong ket noi cu khi day
@@ -1225,6 +1472,46 @@ void startCameraServer() {
 #endif
   };
 
+  // ---- Trang cau hinh + API ----
+  httpd_uri_t setup_uri = {
+    .uri = "/setup",
+    .method = HTTP_GET,
+    .handler = setup_handler,
+    .user_ctx = NULL
+  };
+  httpd_uri_t cfg_get_uri = {
+    .uri = "/api/cfg",
+    .method = HTTP_GET,
+    .handler = cfg_get_handler,
+    .user_ctx = NULL
+  };
+  httpd_uri_t cfg_post_uri = {
+    .uri = "/api/cfg",
+    .method = HTTP_POST,
+    .handler = cfg_post_handler,
+    .user_ctx = NULL
+  };
+  httpd_uri_t scan_uri = {
+    .uri = "/api/scan",
+    .method = HTTP_GET,
+    .handler = scan_handler,
+    .user_ctx = NULL
+  };
+  // Captive portal: dang o AP -> dua dien thoai ve /setup; con lai tra 404
+  httpd_uri_t captive_uri = {
+    .uri = NULL,   // se gan tung endpoint trong vong lap dang ky
+    .method = HTTP_GET,
+    .handler = captive_handler,
+    .user_ctx = NULL
+  };
+  static const char *captive_uris[] = {
+    "/generate_204",               // Android
+    "/hotspot-detect.html",        // iOS / macOS
+    "/library/test/success.html",  // iOS cu
+    "/fwlink",                     // Windows
+    "/ncsi.txt"                    // Windows
+  };
+
   ra_filter_init(&ra_filter, 20);
 
   log_i("Starting web server on port: '%d'", config.server_port);
@@ -1245,6 +1532,17 @@ void startCameraServer() {
     httpd_register_uri_handler(camera_httpd, &greg_uri);
     httpd_register_uri_handler(camera_httpd, &pll_uri);
     httpd_register_uri_handler(camera_httpd, &win_uri);
+
+    // ---- Cau hinh (che do AP + thoi gian su dung binh thuong) ----
+    httpd_register_uri_handler(camera_httpd, &setup_uri);
+    httpd_register_uri_handler(camera_httpd, &cfg_get_uri);
+    httpd_register_uri_handler(camera_httpd, &cfg_post_uri);
+    httpd_register_uri_handler(camera_httpd, &scan_uri);
+    // Cac endpoint captive portal -> dien thoai tu mo trang /setup khi vao AP
+    for (size_t i = 0; i < sizeof(captive_uris) / sizeof(captive_uris[0]); i++) {
+      captive_uri.uri = captive_uris[i];
+      httpd_register_uri_handler(camera_httpd, &captive_uri);
+    }
   }
 
   config.server_port += 1;
