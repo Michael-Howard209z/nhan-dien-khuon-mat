@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Điểm danh khuôn mặt{% endblock %}</title>
+<link rel="preload" href="{{ url_for('static', filename='fonts/Be-Vietnam-Pro-400-vietnamese.woff2') }}" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="{{ url_for('static', filename='fonts.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231d5c3a'/%3E%3Crect x='9' y='9' width='14' height='14' rx='2' fill='none' stroke='white' stroke-width='2.5'/%3E%3C/svg%3E">
+{% block head %}{% endblock %}
+</head>
+<body class="{% block bodyclass %}{% endblock %}">
+<a class="skip" href="#noidung">Bỏ qua tới nội dung</a>
+
+{# Một trang đăng nhập duy nhất ở cổng PORT; trang debug camera ở cổng riêng
+   (CAMERA_PORT) — chỉ tài khoản developer mới thấy/đ vào được. #}
+<header class="topnav">
+  <div class="topnav-inner">
+    <a class="brand" href="{{ portal_url }}/"><span class="brand-mark" aria-hidden="true"></span>Điểm danh khuôn mặt</a>
+    <nav class="navlinks" aria-label="Điều hướng chính">
+      <a href="{{ portal_url }}{{ portal_path }}" class="{% block nav_portal %}{% endblock %}" {% if self.nav_portal() == 'on' %}aria-current="page"{% endif %}>Quản lý</a>
+      {% if session.role == 'developer' %}
+      <a href="{{ camera_url }}/" class="{% block nav_camera %}{% endblock %}" {% if self.nav_camera() == 'on' %}aria-current="page"{% endif %}>Debug camera</a>
+      {% endif %}
+    </nav>
+    <div class="navuser">
+      {% if session.role %}
+        <span>{{ role_label }}{% if session.full_name %}: <b>{{ session.full_name }}</b>{% endif %}</span>
+        <form method="post" action="{{ portal_url }}/dang-xuat" style="display:inline;margin:0">
+          <button class="ghost sm" type="submit">Đăng xuất</button>
+        </form>
+      {% endif %}
+    </div>
+  </div>
+</header>
+
+<main id="noidung">
+  {% block flash %}{% endblock %}
+  {% block content %}{% endblock %}
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+{% block scripts %}{% endblock %}
+</body>
+</html>

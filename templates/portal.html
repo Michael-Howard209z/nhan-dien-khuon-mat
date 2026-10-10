@@ -1,0 +1,1321 @@
+{% extends "base.html" %}
+{% block title %}Quản lý — Điểm danh khuôn mặt{% endblock %}
+{% block bodyclass %}r-{{ role }}{% endblock %}
+{% block nav_portal %}on{% endblock %}
+
+{# Dat o top-level (ngoai moi block): Jinja co lap scope theo block, set trong
+   block content se KHONG thay duoc trong block scripts -> render rong
+   "var STUD = ;" -> chet ca khoi JS, moi nut bam deu liet. #}
+{% set list_students = students if tab == 'dang-ky' else [] %}
+{% set js_studs = list_students | map(attribute='id') | list | tojson %}
+{% set js_names = list_students | map(attribute='full_name') | list | tojson %}
+{% set cls_names = (classes | list | tojson) if tab == 'dang-ky' else '[]' %}
+{% set cls_dict = (classes | map(attribute='name') | list | tojson) if tab == 'lop' else '[]' %}
+{% set cls_all = (classes | map(attribute='name') | list | tojson) if tab == 'giao-vien' else '[]' %}
+
+{% block content %}
+
+<div class="page-head">
+  <div>
+    {% set tns = namespace(label='') %}
+    {% for k, _ic, lbl in tabs %}{% if k == tab %}{% set tns.label = lbl %}{% endif %}{% endfor %}
+    <h1>{{ tns.label or 'Quản lý' }}</h1>
+    <p class="meta">
+      {% if role == 'admin' %}Hôm nay {{ today }} · {{ role_label }}
+      {% else %}{{ me.full_name if me else 'Giáo viên' }} · {{ role_label }}{% endif %}
+      {% if tab == 'dang-ky' %} · <b>{{ students | length }}</b> học sinh
+      {% elif tab == 'hom-nay' %} · Lớp {{ cls or '—' }} · <b>{{ rows | length }}</b> học sinh
+        · <b>{{ present | length }}</b> đủ buổi
+      {% elif tab == 'bao-cao' %} · {{ start }} → {{ end }}
+      {% elif tab == 'diem-danh' %} · <b>{{ students | length }}</b> học sinh
+        {% if present_now %} · <b>{{ present_now }}</b> đã điểm danh hôm nay{% endif %}
+      {% endif %}
+    </p>
+  </div>
+
+  <div class="page-tools">
+    {% if classes is defined and tab in ('dang-ky', 'hom-nay', 'diem-danh') and classes | length > 1 %}
+    <form method="get">
+      <input type="hidden" name="tab" value="{{ tab }}">
+      {% if tab == 'diem-danh' %}<input type="hidden" name="month" value="{{ month }}">{% endif %}
+      <div class="ifield">
+        <label for="cls">Lớp</label>
+        <select name="class" id="cls" onchange="this.form.submit()" style="width:130px">
+          {% for c in classes %}<option value="{{ c }}" {{ 'selected' if c == cls }}>{{ c }}</option>{% endfor %}
+        </select>
+      </div>
+    </form>
+    {% endif %}
+
+    {% if tab == 'diem-danh' %}
+    <form method="get">
+      <input type="hidden" name="tab" value="diem-danh">
+      {% if cls %}<input type="hidden" name="class" value="{{ cls }}">{% endif %}
+      <div class="ifield">
+        <label for="mo">Tháng</label>
+        <input type="month" id="mo" name="month" value="{{ month }}" style="width:150px" onchange="this.form.submit()">
+      </div>
+    </form>
+    {% elif tab == 'hom-nay' %}
+    <a class="ghost sm" href="{{ url_for('quan_ly', tab='hom-nay', **({'class': cls} if cls else {})) }}">Làm mới</a>
+    {% elif tab == 'bao-cao' and csv_url %}
+    <a class="ok sm" href="{{ csv_url }}">Tải CSV (Excel)</a>
+    {% endif %}
+  </div>
+</div>
+
+<nav class="tabs" aria-label="Các mục quản lý">
+  {% for key, _ic, label in tabs %}
+  <a href="{{ url_for('quan_ly', tab=key, month=month) }}" class="{{ 'on' if tab == key }}"{% if tab == key %} aria-current="page"{% endif %}>{{ label }}</a>
+  {% endfor %}
+</nav>
+
+
+{# ==================== TAB: ĐĂNG KÝ KHUÔN MẶT (admin + giáo viên) ====================
+   Chỉ UPLOAD ảnh lên — không chụp trực tiếp từ camera. #}
+{% if tab == 'dang-ky' %}
+{% if not classes %}
+<div class="panel"><div class="empty">
+  {% if role == 'teacher' %}
+    <strong>Tài khoản của bạn chưa được gán lớp nào.</strong>Hãy liên hệ quản trị viên để được gán lớp dạy.
+  {% else %}
+    <strong>Chưa có lớp nào trong hệ thống.</strong>Vào tab Lớp &amp; lịch học để thêm lớp.
+  {% endif %}
+</div></div>
+{% else %}
+<div class="grid g2">
+  <section class="panel" aria-label="Đăng ký học sinh mới">
+    <h2>Đăng ký học sinh mới</h2>
+    <p class="panel-sub">Tải ảnh khuôn mặt lên (không chụp tại camera). Nên có 4–8 ảnh
+      khác nhau: chính diện, hơi nghiêng, gần và xa — nhận diện sẽ đúng hơn.</p>
+    <form id="regForm">
+      <div class="field">
+        <label for="regName">Họ và tên</label>
+        <input type="text" id="regName" placeholder="VD: Nguyễn Văn An" required autocomplete="off">
+      </div>
+      <div class="grid g2" style="gap:12px">
+        <div class="field">
+          <label for="regDob">Ngày sinh</label>
+          <input type="date" id="regDob" required>
+        </div>
+        <div class="field">
+          <label for="regCls">Lớp</label>
+          <select id="regCls" required>
+            {% for c in classes %}<option value="{{ c }}" {{ 'selected' if c == cls }}>{{ c }}</option>{% endfor %}
+          </select>
+        </div>
+      </div>
+      <div class="field">
+        <label for="regFile">Ảnh khuôn mặt <span class="opt">(chọn được nhiều ảnh)</span></label>
+        <input type="file" id="regFile" accept="image/*" multiple>
+        <div class="thumbs" id="regPrev" aria-live="polite"></div>
+      </div>
+      <button class="block ok" type="submit">Đăng ký khuôn mặt</button>
+      <div id="regMsg" class="hint" style="margin-top:10px" role="alert"></div>
+    </form>
+  </section>
+
+  <section class="panel" aria-label="Danh sách học sinh">
+    <div class="panel-head">
+      <div>
+        <h2>Danh sách học sinh <span class="badge mute">{{ students | length }}</span></h2>
+        <p class="sub">Bấm "Thêm mẫu" để bổ sung ảnh, "Sửa" để sửa thông tin.</p>
+      </div>
+      <form method="get" class="toolbar" style="margin:0" role="search" aria-label="Tìm học sinh">
+        <input type="hidden" name="tab" value="dang-ky">
+        {% if cls %}<input type="hidden" name="class" value="{{ cls }}">{% endif %}
+        <div class="field"><input type="search" name="q" value="{{ q }}" placeholder="Tên hoặc mã..." style="width:170px" aria-label="Tìm kiếm"></div>
+        <div class="field"><button class="ghost sm" type="submit">Tìm</button></div>
+      </form>
+    </div>
+    {% if students %}
+    <div class="tablewrap scroll">
+      <table>
+        <thead><tr><th>Họ và tên</th><th>Lớp</th><th class="num">Mẫu</th><th class="num">Đã đi học</th><th>Thao tác</th></tr></thead>
+        <tbody>
+        {% for s in students %}
+          <tr>
+            <td><b>{{ s.full_name }}</b><div class="muted">ID {{ s.id }} · {{ s.date_of_birth }}</div></td>
+            <td><span class="badge info">{{ s.class_name }}</span></td>
+            <td class="num">{% if s.samples > 0 %}<span class="at yes">{{ s.samples }}</span>{% else %}<span class="at no">0</span>{% endif %}</td>
+            <td class="num">{% if s.days_present %}<b>{{ s.days_present }}</b> <span class="muted">ngày</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+            <td>
+              <div class="row">
+                <button type="button" class="ghost sm" data-face="{{ s.id }}" data-name="{{ s.full_name }}">Thêm mẫu</button>
+                <button type="button" class="ghost sm" data-edit="{{ s.id }}">Sửa</button>
+                <button type="button" class="ghost sm danger" data-del="{{ s.id }}" data-name="{{ s.full_name }}">Xoá</button>
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty">{% if q %}<strong>Không tìm thấy học sinh nào khớp.</strong>{% else %}<strong>Chưa có học sinh nào.</strong>Điền form bên cạnh để đăng ký người đầu tiên.{% endif %}</div>
+    {% endif %}
+  </section>
+</div>
+{% endif %}
+
+
+{# ==================== TAB: HÔM NAY (admin + giáo viên) ====================
+   Danh sách theo buổi: ai đủ buổi, ai còn thiếu, ai nghỉ, ai vắng. #}
+{% elif tab == 'hom-nay' %}
+{% if not classes %}
+<div class="panel"><div class="empty">
+  {% if role == 'teacher' %}
+    <strong>Tài khoản của bạn chưa được gán lớp nào.</strong>Hãy liên hệ quản trị viên.
+  {% else %}
+    <strong>Chưa có lớp nào.</strong>Vào tab Lớp &amp; lịch học để thêm lớp.
+  {% endif %}
+</div></div>
+{% elif not rows %}
+<div class="panel"><div class="empty"><strong>Lớp {{ cls }} chưa có học sinh nào.</strong></div></div>
+{% else %}
+<div class="stats" style="grid-template-columns:repeat(4,1fr)">
+  <div class="stat"><span class="k">Đủ {{ n_sessions }}/{{ n_sessions }} buổi</span><span class="v">{{ present | length }}</span><span class="n">đi học đủ</span></div>
+  <div class="stat"><span class="k">Thiếu buổi</span><span class="v">{{ partial | length }}</span><span class="n">mới điểm danh 1 buổi</span></div>
+  <div class="stat"><span class="k">Nghỉ có lý do</span><span class="v">{{ leave | length }}</span><span class="n">được ghi chú</span></div>
+  <div class="stat{{ ' bad' if absent | length }}"><span class="k">Chưa điểm danh</span><span class="v">{{ absent | length }}</span><span class="n">cần liên hệ</span></div>
+</div>
+
+<div class="panel" style="padding:12px 16px" aria-label="Chú giải">
+  <div class="row">
+    <span class="muted"><b>Chú giải:</b></span>
+    <span class="at yes">Có mặt</span>
+    <span class="at no">Vắng (chưa điểm danh)</span>
+    <span class="at none">Chưa tới giờ</span>
+    <span class="at leave">Nghỉ (có lý do)</span>
+    <span class="muted" style="margin-left:auto">Học sinh bấm nút trên ESP32-CAM để điểm danh — mỗi buổi chỉ tính 1 lần</span>
+  </div>
+</div>
+
+<section class="panel" aria-label="Danh sách lớp {{ cls }} hôm nay {{ day }}">
+  <div class="panel-head">
+    <div><h2>Lớp {{ cls }} — {{ day }}</h2>
+      <p class="sub">Lịch học: {{ '2 buổi (sáng + chiều)' if n_sessions >= 2 else '1 buổi/ngày' }}
+        · khung {{ report.schedule.sang_start }}–{{ report.schedule.sang_end }}
+        {% if n_sessions >= 2 %}và {{ report.schedule.chieu_start }}–{{ report.schedule.chieu_end }}{% endif %}</p>
+    </div>
+  </div>
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th>Học sinh</th>
+        <th>Buổi sáng</th>
+        {% if n_sessions >= 2 %}<th>Buổi chiều</th>{% endif %}
+        <th>Trạng thái</th><th>Ghi chú nghỉ</th><th><span class="muted">Thao tác</span></th>
+      </tr></thead>
+      <tbody>
+      {% for r in rows %}
+        {% set s1 = r.session_state.get(1) %}
+        {% set s2 = r.session_state.get(2) %}
+        <tr>
+          <td><b>{{ r.full_name }}</b><div class="muted">ID {{ r.id }}</div></td>
+          <td>
+            {% if s1 == 'present' %}<span class="at yes" title="{{ r.detail[1].first_seen[11:16] }}–{{ r.detail[1].last_seen[11:16] }}">Có {{ r.detail[1].first_seen[11:16] }}</span>
+            {% elif s1 == 'absent' %}<span class="at no">Vắng</span>
+            {% elif s1 == 'future' %}<span class="at none">Chưa tới</span>
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+          {% if n_sessions >= 2 %}
+          <td>
+            {% if s2 == 'present' %}<span class="at yes" title="{{ r.detail[2].first_seen[11:16] }}–{{ r.detail[2].last_seen[11:16] }}">Có {{ r.detail[2].first_seen[11:16] }}</span>
+            {% elif s2 == 'absent' %}<span class="at no">Vắng</span>
+            {% elif s2 == 'future' %}<span class="at none">Chưa tới</span>
+            {% else %}<span class="muted">—</span>{% endif %}
+          </td>
+          {% endif %}
+          <td>
+            {% if r.status == 'full' %}<span class="at yes">Đủ buổi</span>
+            {% elif r.status == 'partial' %}<span class="at leave">Thiếu buổi</span>
+            {% elif r.status == 'leave' %}<span class="at leave">Nghỉ</span>
+            {% else %}<span class="at no">Vắng</span>{% endif %}
+          </td>
+          <td>{% if r.absence %}{{ r.absence.reason }}{% if r.absence.created_by %}<div class="muted">— {{ r.absence.created_by }}</div>{% endif %}{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td><button type="button" class="ghost sm" data-abs="{{ r.id }}" data-name="{{ r.full_name }}" data-day="{{ day }}" data-state="{{ 'has' if r.sessions_present else 'miss' }}">Ghi chú nghỉ</button></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+
+{# ==================== TAB: BÁO CÁO (admin + giáo viên) — bảng kiểu Excel ==================== #}
+{% elif tab == 'bao-cao' %}
+{% if not classes %}
+<div class="panel"><div class="empty">
+  {% if role == 'teacher' %}<strong>Tài khoản của bạn chưa được gán lớp nào.</strong>Hãy liên hệ quản trị viên.
+  {% else %}<strong>Chưa có lớp nào.</strong>Vào tab Lớp &amp; lịch học để thêm lớp.{% endif %}
+</div></div>
+{% else %}
+<section class="panel" style="padding:12px 16px" aria-label="Chọn báo cáo">
+  <form method="get" class="toolbar" style="margin:0">
+    <input type="hidden" name="tab" value="bao-cao">
+    <div class="field">
+      <label for="rm">Kiểu báo cáo</label>
+      <select name="mode" id="rm" onchange="this.form.submit()">
+        <option value="day" {{ 'selected' if mode == 'day' }}>Theo ngày</option>
+        <option value="week" {{ 'selected' if mode == 'week' }}>Theo tuần (Thứ 2 → Chủ nhật)</option>
+        <option value="month" {{ 'selected' if mode == 'month' }}>Theo tháng</option>
+      </select>
+    </div>
+    <div class="field">
+      <label for="rd">Ngày / tuần / tháng</label>
+      <input type="date" id="rd" name="date" value="{{ date }}" onchange="this.form.submit()">
+    </div>
+    {% if classes | length > 1 %}
+    <div class="field">
+      <label for="rc">Lớp</label>
+      <select name="class" id="rc" onchange="this.form.submit()">
+        {% for c in classes %}<option value="{{ c }}" {{ 'selected' if c == cls }}>{{ c }}</option>{% endfor %}
+      </select>
+    </div>
+    {% endif %}
+    <div class="field"><button class="ghost sm" type="submit">Xem</button></div>
+    {% if csv_url %}<a class="ok sm" href="{{ csv_url }}">Tải CSV (Excel)</a>{% endif %}
+  </form>
+</section>
+
+{% if report and report.students %}
+<div class="panel" style="padding:12px 16px" aria-label="Chú giải">
+  <div class="row">
+    <span class="muted"><b>Chú giải:</b></span>
+    <span class="at yes">● đủ buổi</span>
+    <span class="at leave">◐ thiếu 1 buổi</span>
+    <span class="at leave">N nghỉ</span>
+    <span class="at no">✕ vắng</span>
+    <span class="at none">· hôm nay chưa điểm danh</span>
+    <span class="muted" style="margin-left:auto">{{ start }} → {{ end }} · {{ report.students | length }} học sinh</span>
+  </div>
+</div>
+
+<section class="panel" aria-label="Báo cáo điểm danh">
+  <div class="tablewrap scroll">
+    <table class="sticky">
+      <thead>
+        <tr>
+          <th style="min-width:170px">Học sinh</th>
+          {% for d in report.days %}<th class="num" title="{{ d }}">{{ d[8:10] }}/{{ d[5:7] }}</th>{% endfor %}
+          <th class="num" title="Ngày đủ mọi buổi">Đủ buổi</th>
+          <th class="num" title="Tổng ngày có mặt (kể cả buổi lẻ)">Có mặt</th>
+          <th class="num">Buổi lẻ</th>
+          <th class="num">Nghỉ</th>
+          <th class="num">Vắng</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for s in report.students %}
+        {% set t = report.totals[s.id] %}
+        <tr>
+          <td><b>{{ s.full_name }}</b><div class="muted">{{ s.class_name }} · ID {{ s.id }}</div></td>
+          {% for d in report.days %}
+            {% set cell = report.matrix[s.id][d] %}
+            {% if cell.state == 'full' %}
+            <td class="rc" title="{{ s.full_name }} {{ d }} · đủ {{ report.schedule.sessions }} buổi (buổi {{ cell.sessions | join(', ') }})"><span class="full">●</span></td>
+            {% elif cell.state == 'partial' %}
+            <td class="rc" title="{{ s.full_name }} {{ d }} · chỉ 1 buổi (buổi {{ cell.sessions | join(', ') }})"><span class="part">◐</span></td>
+            {% elif cell.state == 'leave' %}
+            <td class="rc" title="{{ s.full_name }} {{ d }} · nghỉ: {{ report.absences[(s.id, d)].reason }}"><span class="leave">N</span></td>
+            {% elif cell.state == 'absent' %}
+            <td class="rc" title="{{ s.full_name }} {{ d }} · không điểm danh"><span class="absent">✕</span></td>
+            {% elif cell.state == 'pending' %}
+            <td class="rc" title="{{ s.full_name }} {{ d }} · hôm nay chưa điểm danh"><span class="pending">·</span></td>
+            {% else %}
+            <td class="rc" title="{{ d }} · chưa tới ngày"></td>
+            {% endif %}
+          {% endfor %}
+          <td class="num"><b>{{ t.full }}</b></td>
+          <td class="num">{{ t.attended }}</td>
+          <td class="num">{{ t.partial }}</td>
+          <td class="num">{{ t.leave }}</td>
+          <td class="num">{% if t.absent %}<span class="at no">{{ t.absent }}</span>{% else %}0{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% else %}
+<div class="panel"><div class="empty"><strong>Lớp {{ cls }} chưa có học sinh nào.</strong></div></div>
+{% endif %}
+{% endif %}
+
+
+{# ==================== TAB: TỔNG QUAN (admin) ==================== #}
+{% elif tab == 'tong-quan' %}
+<div class="stats">
+  <div class="stat"><span class="k">Tổng học sinh</span><span class="v">{{ overview.total_students }}</span><span class="n">đã đăng ký khuôn mặt</span></div>
+  <div class="stat"><span class="k">Số lớp</span><span class="v">{{ overview.total_classes }}</span><span class="n">{{ overview.total_teachers }} tài khoản giáo viên</span></div>
+  <div class="stat"><span class="k">Có mặt hôm nay</span><span class="v">{{ overview.present_today }}</span><span class="n">≥1 buổi · ngày {{ overview.today }}</span></div>
+  <div class="stat{{ ' bad' if overview.absent_today }}"><span class="k">Chưa điểm danh</span><span class="v">{{ overview.absent_today }}</span><span class="n">cần kiểm tra</span></div>
+</div>
+
+<div class="grid g2">
+  <section class="panel" aria-label="Sĩ số các lớp">
+    <h2>Sĩ số các lớp</h2>
+    {% if overview.classes %}
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Lớp</th><th>Buổi/ngày</th><th class="num">Sĩ số</th><th class="num">Có mặt hôm nay</th><th style="width:34%">Tỉ lệ</th></tr></thead>
+        <tbody>
+        {% for c in overview.classes %}
+          <tr>
+            <td><b>{{ c.name }}</b></td>
+            <td><span class="badge mute">{{ c.schedule.sessions }}</span></td>
+            <td class="num">{{ c.total }}</td>
+            <td class="num"><span class="at {{ 'yes' if c.present else 'no' }}">{{ c.present }}</span></td>
+            <td>
+              {% set pct = (c.present * 100 // c.total) if c.total else 0 %}
+              <div class="bar {{ 'low' if pct < 50 else ('mid' if pct < 90 else '') }}"><i style="width:{{ pct }}%"></i></div>
+              <span class="muted">{{ pct }}%</span>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty"><strong>Chưa có lớp nào.</strong>Vào tab Lớp &amp; lịch học để thêm lớp đầu tiên.</div>
+    {% endif %}
+  </section>
+
+  <section class="panel" aria-label="Biểu đồ 7 ngày">
+    <h2>Có mặt trong 7 ngày gần nhất</h2>
+    {% if overview.week %}
+      {% set mx = overview.week | map(attribute='n') | max %}
+      <div class="chart" role="img" aria-label="Số học sinh có mặt từng ngày">
+        {% for d in overview.week %}
+        <div class="col">
+          <span class="vl">{{ d.n }}</span>
+          <div class="bar" style="height:{{ (d.n * 100 // mx) if mx else 0 }}%"></div>
+          <span class="lb">{{ d.day[8:10] }}/{{ d.day[5:7] }}</span>
+        </div>
+        {% endfor %}
+      </div>
+    {% else %}
+      <div class="empty">Chưa có dữ liệu điểm danh.</div>
+    {% endif %}
+  </section>
+</div>
+
+<section class="panel" aria-label="Đã điểm danh hôm nay">
+  <div class="panel-head">
+    <div><h2>Đã điểm danh hôm nay <span class="badge mute">{{ present | length }}</span></h2></div>
+    <a class="ghost sm" href="{{ url_for('quan_ly', tab='hom-nay') }}">Xem danh sách hôm nay</a>
+  </div>
+  {% if present %}
+  <div class="tablewrap scroll">
+    <table>
+      <thead><tr><th>Họ và tên</th><th>Lớp</th><th>Buổi đã điểm</th><th>Vào</th><th>Ra</th><th class="num">Số lần nhận</th></tr></thead>
+      <tbody>
+      {% for p in present %}
+        <tr>
+          <td>{{ p.full_name }}</td>
+          <td><span class="badge info">{{ p.class_name }}</span></td>
+          <td>{% for ses in p.sessions %}<span class="badge mute" style="margin-right:3px">{{ 'Sáng' if ses == 1 else 'Chiều' }}</span>{% endfor %}</td>
+          <td class="muted">{{ p.first_seen[11:16] }}</td>
+          <td class="muted">{{ p.last_seen[11:16] }}</td>
+          <td class="num">{{ p.hits }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <div class="empty"><strong>Hôm nay chưa có ai được điểm danh.</strong>
+    Học sinh bấm nút trên ESP32-CAM để điểm danh; kiểm tra camera ở tab Hệ thống.</div>
+  {% endif %}
+</section>
+
+
+{# ==================== TAB: ĐIỂM DANH THEO THÁNG (admin) ==================== #}
+{% elif tab == 'diem-danh' %}
+{% if not classes %}
+<div class="panel"><div class="empty"><strong>Chưa có lớp nào.</strong>Vào tab Lớp &amp; lịch học để thêm lớp.</div></div>
+{% elif not students %}
+<div class="panel"><div class="empty"><strong>Lớp {{ cls }} chưa có học sinh nào.</strong></div></div>
+{% else %}
+<div class="panel" style="padding:12px 16px" aria-label="Chú giải">
+  <div class="row">
+    <span class="muted"><b>Chú giải:</b></span>
+    <span class="at yes">● đủ {{ expected }}/{{ expected }} buổi</span>
+    <span class="at leave">◐ chỉ 1 buổi</span>
+    <span class="at leave">N nghỉ</span>
+    <span class="at no">✕ vắng</span>
+    <span class="at none">chưa tới ngày</span>
+    <span class="muted" style="margin-left:auto">Bấm vào ô để ghi lý do nghỉ</span>
+  </div>
+</div>
+
+<section class="panel" aria-label="Lịch điểm danh">
+  <div class="panel-head">
+    <div>
+      <h2>Lịch điểm danh tháng {{ month }} <span class="badge mute">{{ cls }}</span></h2>
+      <p class="sub">Lớp {{ cls }}: {{ expected }} buổi/ngày. Mỗi ô là một ngày — ký hiệu theo số buổi đã điểm.</p>
+    </div>
+  </div>
+  <div class="tablewrap">
+    <table class="sticky">
+      <thead>
+        <tr>
+          <th style="min-width:170px">Học sinh</th>
+          <th class="num" title="Tổng số ngày đã đi học từ trước">Tổng ngày</th>
+          <th class="num" title="Số ngày đủ mọi buổi trong tháng">Đủ buổi</th>
+          <th class="num" title="Số ngày không điểm danh trong tháng">Vắng</th>
+          <th style="min-width:270px">Các ngày trong tháng</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for s in students %}
+        {% set mine = att.get(s.id, {}) %}
+        <tr>
+          <td><b>{{ s.full_name }}</b><div class="muted">ID {{ s.id }}</div></td>
+          <td class="num">{% if s.days_present %}<b>{{ s.days_present }}</b>{% else %}<span class="muted">—</span>{% endif %}</td>
+          <td class="num"><span class="at {{ 'yes' if s.month_full else 'none' }}">{{ s.month_full }}</span></td>
+          <td class="num">
+            {% if s.month_absent %}<span class="at no">{{ s.month_absent }}</span>
+            {% else %}<span class="at none">0</span>{% endif %}
+          </td>
+          <td>
+            <div class="daygrid">
+              {% for d in days %}
+                {% set ses = mine[d].sessions if d in mine else [] %}
+                {% set st = 'has' if d in mine and ses | length >= expected
+                           else ('part' if d in mine
+                           else ('leave' if (s.id, d) in absences
+                           else ('miss' if d < today else 'none'))) %}
+                {% if st == 'none' %}
+                <div aria-hidden="true">·</div>
+                {% else %}
+                <button type="button" class="{{ st }}"
+                     data-sid="{{ s.id }}" data-day="{{ d }}"
+                     data-name="{{ s.full_name }}"
+                     data-state="{{ st }}"
+                     aria-label="{{ s.full_name }}, ngày {{ d }}: {{ 'đủ buổi' if st == 'has' else ('một buổi' if st == 'part' else ('nghỉ: ' + absences[(s.id, d)].reason if st == 'leave' else 'không điểm danh')) }}"
+                     title="{{ s.full_name }} — {{ d }}{% if d in mine %} · buổi {{ ses | join(', ') }} · {{ mine[d].first_seen[11:16] }}–{{ mine[d].last_seen[11:16] }}{% elif (s.id, d) in absences %} · nghỉ: {{ absences[(s.id, d)].reason }}{% elif d < today %} · không điểm danh{% endif %}">{% if st == 'has' %}●{% elif st == 'part' %}◐{% elif st == 'leave' %}N{% else %}✕{% endif %}</button>
+                {% endif %}
+              {% endfor %}
+            </div>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endif %}
+
+
+{# ==================== TAB: LỚP & LỊCH HỌC (admin) ==================== #}
+{% elif tab == 'lop' %}
+<div class="grid g2">
+  <section class="panel" aria-label="Thêm lớp mới">
+    <h2>Thêm lớp mới</h2>
+    <p class="panel-sub">Tên tự chuẩn hoá, không phân biệt hoa/thường và khoảng trắng.
+      Sau khi thêm, đặt <b>lịch học</b> (số buổi/ngày + khung giờ) để điểm danh theo buổi.</p>
+    <div class="field">
+      <label for="nc">Tên lớp</label>
+      <input type="text" id="nc" placeholder="VD: 12A1" style="max-width:220px" autocomplete="off">
+      <p class="hint"><code>12 a1</code> sẽ thành <code>12A1</code>.</p>
+    </div>
+    <button type="button" class="ok" id="addCls">Thêm lớp</button>
+    <div id="addMsg" class="hint" style="margin-top:8px" role="alert"></div>
+  </section>
+
+  <section class="panel" aria-label="Danh mục lớp và lịch học">
+    <h2>Danh mục lớp</h2>
+    {% if classes %}
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Lớp</th><th>Lịch học</th><th class="num">Sĩ số</th><th class="num">Hôm nay</th><th><span class="muted">Thao tác</span></th></tr></thead>
+        <tbody>
+        {% for c in classes %}
+          <tr>
+            <td><b>{{ c.name }}</b></td>
+            <td class="muted">{{ c.schedule.sessions }} buổi · {{ c.schedule.sang_start }}–{{ c.schedule.sang_end }}{% if c.schedule.sessions >= 2 %}, {{ c.schedule.chieu_start }}–{{ c.schedule.chieu_end }}{% endif %}</td>
+            <td class="num">{{ c.total }}</td>
+            <td class="num"><span class="at {{ 'yes' if c.present else 'no' }}">{{ c.present }}</span></td>
+            <td style="text-align:right">
+              <div class="row" style="justify-content:flex-end">
+                <button type="button" class="ghost sm" data-sched="{{ c.name }}">Lịch học</button>
+                <button type="button" class="ghost sm" data-rencls="{{ c.name }}">Đổi tên</button>
+                <button type="button" class="ghost sm danger" data-delcls="{{ c.name }}" data-n="{{ c.total }}">Xoá</button>
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty">Chưa có lớp nào.</div>
+    {% endif %}
+  </section>
+</div>
+
+
+{# ==================== TAB: GIÁO VIÊN (admin) ==================== #}
+{% elif tab == 'giao-vien' %}
+<div class="grid g2">
+  <section class="panel" aria-label="Tạo tài khoản giáo viên">
+    <h2>Tạo tài khoản giáo viên</h2>
+    <p class="panel-sub">Giáo viên đăng nhập ở <b>cùng một trang đăng nhập</b> bằng tên
+      đăng nhập + mật khẩu này, và chỉ thấy các lớp được gán.</p>
+    <form id="tvForm">
+      <div class="field">
+        <label for="tvFull">Họ và tên</label>
+        <input type="text" id="tvFull" placeholder="VD: Nguyễn Thị Lan" required autocomplete="off">
+      </div>
+      <div class="grid g2" style="gap:12px">
+        <div class="field">
+          <label for="tvUser">Tên đăng nhập</label>
+          <input type="text" id="tvUser" placeholder="VD: lantruong" required autocomplete="off" autocapitalize="none">
+        </div>
+        <div class="field">
+          <label for="tvPass">Mật khẩu <span class="opt">(ít nhất 4 ký tự)</span></label>
+          <input type="text" id="tvPass" minlength="4" required autocomplete="new-password">
+        </div>
+      </div>
+      <div class="field">
+        <span class="lbl" id="tvClsLbl">Lớp được dạy <span class="opt">(chọn được nhiều)</span></span>
+        <div role="group" aria-labelledby="tvClsLbl">
+          {% for c in classes %}<label class="check"><input type="checkbox" class="tvCls" value="{{ c.name }}"> Lớp {{ c.name }}</label>{% endfor %}
+          {% if not classes %}<p class="hint">Chưa có lớp — thêm lớp ở tab Lớp &amp; lịch học trước.</p>{% endif %}
+        </div>
+      </div>
+      <button class="block ok" type="submit">Tạo tài khoản</button>
+      <div id="tvMsg" class="hint" style="margin-top:10px" role="alert"></div>
+    </form>
+  </section>
+
+  <section class="panel" aria-label="Danh sách tài khoản giáo viên">
+    <h2>Tài khoản giáo viên <span class="badge mute">{{ teachers | length }}</span></h2>
+    {% if teachers %}
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Họ và tên</th><th>Tên đăng nhập</th><th>Lớp được dạy</th><th><span class="muted">Thao tác</span></th></tr></thead>
+        <tbody>
+        {% for t in teachers %}
+          <tr>
+            <td><b>{{ t.full_name }}</b></td>
+            <td class="muted">{{ t.username }}</td>
+            <td>
+              {% for c in t.classes %}<span class="badge info" style="margin:0 3px 3px 0">{{ c }}</span>{% else %}
+              <span class="at no">chưa gán lớp</span>{% endfor %}
+            </td>
+            <td style="text-align:right">
+              <div class="row" style="justify-content:flex-end">
+                <button type="button" class="ghost sm" data-assign="{{ t.id }}" data-name="{{ t.full_name }}">Gán lớp</button>
+                <button type="button" class="ghost sm danger" data-delteacher="{{ t.id }}" data-name="{{ t.full_name }}">Xoá</button>
+              </div>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty">Chưa có tài khoản giáo viên nào — tạo ở cột bên trái.</div>
+    {% endif %}
+  </section>
+</div>
+
+
+{# ==================== TAB: HỆ THỐNG (admin) ==================== #}
+{% elif tab == 'he-thong' %}
+{% set up = sysinfo.uptime_sec %}
+<div class="stats">
+  <div class="stat"><span class="k">Thời gian chạy</span><span class="v" style="font-size:19px;padding-top:7px">{{ up // 3600 }} giờ {{ (up % 3600) // 60 }} phút</span><span class="n">từ {{ sysinfo.started_at }}</span></div>
+  <div class="stat"><span class="k">Bộ nhớ (RAM)</span><span class="v">{{ sysinfo.rss_mb if sysinfo.rss_mb else '—' }}</span><span class="n">MB · {{ sysinfo.threads }} thread</span></div>
+  <div class="stat"><span class="k">Khung hình</span><span class="v" style="font-size:19px;padding-top:7px">{{ sysinfo.frame_source }}</span><span class="n">{% if sysinfo.frame_age %}cũ {{ sysinfo.frame_age }}s{% else %}không có khung{% endif %}</span></div>
+  <div class="stat"><span class="k">Học sinh / lớp</span><span class="v">{{ sysinfo.counts.students }} / {{ sysinfo.counts.classes }}</span><span class="n">{{ sysinfo.counts.teachers }} GV · {{ sysinfo.counts.users }} tài khoản</span></div>
+</div>
+
+<div class="grid g2">
+  <section class="panel" aria-label="Mô hình nhận diện">
+    <h2>Mô hình nhận diện</h2>
+    <div class="tablewrap">
+      <table>
+        <tbody>
+          <tr><td>Detector</td><td><b>{{ sysinfo.engine.detector }}</b>{% if sysinfo.engine.landmark_align %} <span class="badge mute">landmark</span>{% endif %}</td></tr>
+          <tr><td>Recognizer</td><td><b>{{ sysinfo.engine.recognizer }}</b> · metric {{ sysinfo.engine.metric }}</td></tr>
+          <tr><td>Ngưỡng</td><td><b>{{ sysinfo.engine.threshold }}</b>{% if sysinfo.engine.adaptive %} + ngưỡng riêng/người{% endif %} · margin {{ sysinfo.engine.threshold_margin }}</td></tr>
+          <tr><td>Đã nạp</td><td>{{ sysinfo.engine.identities }} người · {{ sysinfo.engine.faces_loaded }} mẫu</td></tr>
+          <tr><td>Theo dõi (track)</td><td>{{ 'bật' if sysinfo.engine.tracking else 'tắt' }} · {{ sysinfo.engine.tracks }} track đang sống</td></tr>
+          <tr><td>Thời gian xử lý</td>
+            <td>{% for k, v in sysinfo.engine.timing_ms.items() %}<span class="badge mute" style="margin:0 3px 3px 0">{{ k }} {{ v }}ms</span>{% endfor %}</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel" aria-label="ESP32-CAM và nguồn xem">
+    <h2>ESP32-CAM &amp; nguồn hình</h2>
+    <div class="tablewrap">
+      <table>
+        <tbody>
+          <tr><td>PUSH từ ESP32</td><td>
+            {% if sysinfo.esp32.push_alive %}<span class="at yes">sống</span> · {{ sysinfo.esp32.push_count }} khung
+            {% else %}<span class="at no">không nhận</span>{% if sysinfo.esp32.push_last_age %} · lần cuối {{ sysinfo.esp32.push_last_age }}s{% endif %}{% endif %}
+          </td></tr>
+          <tr><td>IP ESP32</td><td>{{ sysinfo.esp32.ip or '—' }}</td></tr>
+          <tr><td>PULL (STREAM_URL)</td><td>{{ sysinfo.stream_url or '—' }}</td></tr>
+          <tr><td>Camera kết nối</td><td>{% if sysinfo.camera.connected %}<span class="at yes">kết nối</span> · {{ sysinfo.camera.fps }} fps{% else %}<span class="at no">ngắt</span>{% endif %} {% if sysinfo.camera.error %}<div class="muted">{{ sysinfo.camera.error }}</div>{% endif %}</td></tr>
+          <tr><td>Nguồn khung hiện tại</td><td><b>{{ sysinfo.frame_source }}</b></td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel" aria-label="Cơ sở dữ liệu">
+    <h2>Cơ sở dữ liệu</h2>
+    <div class="tablewrap">
+      <table>
+        <tbody>
+          <tr><td>File</td><td class="muted" style="word-break:break-all">{{ sysinfo.db.path }}</td></tr>
+          <tr><td>Dung lượng</td><td><b>{{ sysinfo.db.size_mb }} MB</b></td></tr>
+          <tr><td>Nhật ký nhận diện</td><td>{{ sysinfo.counts.log_rows }} dòng (giữ 500 gần nhất — thống kê dùng bảng điểm danh)</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="panel" aria-label="Cổng dịch vụ">
+    <h2>Cổng dịch vụ</h2>
+    <div class="tablewrap">
+      <table>
+        <tbody>
+          <tr><td>Đăng nhập / quản lý</td><td><b>:{{ sysinfo.ports.portal }}</b></td></tr>
+          <tr><td>Debug camera (developer)</td><td><b>:{{ sysinfo.ports.camera }}</b></td></tr>
+          <tr><td>Điểm danh ESP32</td><td class="muted">POST /api/esp32/frame?capture=1</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="hint" style="margin-top:10px">Muốn xem livestream / cấu hình ESP32, đăng nhập
+      bằng tài khoản <span class="kbd">developer</span>.</p>
+  </section>
+</div>
+<button type="button" class="ghost sm" onclick="location.reload()">Làm mới số liệu</button>
+{% endif %}
+
+
+{# ==================== HỘP THOẠI DÙNG CHUNG ==================== #}
+<div class="modal" id="mAtt" role="dialog" aria-modal="true" aria-label="Lịch đi học">
+  <div class="box">
+    <div class="panel-head" style="margin-bottom:8px">
+      <h3>Lịch đi học</h3>
+      <button type="button" class="ghost sm" data-close="mAtt">Đóng</button>
+    </div>
+    <div id="attBody"></div>
+  </div>
+</div>
+
+<div class="modal" id="mFace" role="dialog" aria-modal="true" aria-label="Thêm mẫu khuôn mặt">
+  <div class="box">
+    <div class="panel-head" style="margin-bottom:8px">
+      <h3 id="faceTitle">Thêm mẫu khuôn mặt</h3>
+      <button type="button" class="ghost sm" data-close="mFace">Đóng</button>
+    </div>
+    <p class="sub" id="faceSub">Tải ảnh lên để bổ sung mẫu cho học sinh này (tối đa 8 ảnh/lần).</p>
+    <div class="field">
+      <label for="faceFile">Ảnh mới</label>
+      <input type="file" id="faceFile" accept="image/*" multiple>
+    </div>
+    <div class="foot">
+      <button type="button" class="ghost danger" id="faceReset">Xoá toàn bộ mẫu cũ</button>
+      <span style="flex:1"></span>
+      <button type="button" class="ghost" data-close="mFace">Huỷ</button>
+      <button type="button" class="ok" id="faceAdd">Thêm mẫu</button>
+    </div>
+    <div id="faceMsg" class="hint" style="margin-top:10px" role="alert"></div>
+  </div>
+</div>
+
+<div class="modal" id="mEdit" role="dialog" aria-modal="true" aria-label="Sửa thông tin học sinh">
+  <div class="box">
+    <div class="panel-head" style="margin-bottom:8px">
+      <h3>Sửa thông tin học sinh</h3>
+      <button type="button" class="ghost sm" data-close="mEdit">Đóng</button>
+    </div>
+    <div class="field"><label for="edName">Họ và tên</label><input type="text" id="edName"></div>
+    <div class="field"><label for="edDob">Ngày sinh</label><input type="date" id="edDob"></div>
+    <div class="field"><label for="edCls">Lớp</label>
+      <select id="edCls">{% for c in (classes if tab == 'dang-ky' else []) %}<option value="{{ c }}">{{ c }}</option>{% endfor %}</select>
+    </div>
+    <div class="foot">
+      <button type="button" class="ghost" data-close="mEdit">Huỷ</button>
+      <button type="button" class="ok" id="edSave">Lưu</button>
+    </div>
+    <div id="edMsg" class="hint" style="margin-top:10px" role="alert"></div>
+  </div>
+</div>
+
+<div class="modal" id="mAbs" role="dialog" aria-modal="true" aria-label="Ghi chú học sinh nghỉ">
+  <div class="box">
+    <div class="panel-head" style="margin-bottom:8px">
+      <h3 id="absTitle">Ghi chú học sinh nghỉ</h3>
+      <button type="button" class="ghost sm" data-close="mAbs">Đóng</button>
+    </div>
+    <div id="absInfo" class="hint" style="margin-bottom:12px"></div>
+    <input type="hidden" id="absSid"><input type="hidden" id="absDay">
+    <div class="field">
+      <label for="absReason">Lý do nghỉ</label>
+      <input type="text" id="absReason" list="lyDo" placeholder="VD: Sốt, ốm, xin phép nghỉ..." autocomplete="off">
+      <datalist id="lyDo">
+        <option value="Sốt, ốm"></option><option value="Xin phép nghỉ học"></option>
+        <option value="Vắng mặt không phép"></option><option value="Đi khám bệnh"></option>
+        <option value="Việc gia đình"></option>
+      </datalist>
+      <p class="hint">Ghi chú hiện trong báo cáo vắng của lớp.</p>
+    </div>
+    <div class="foot">
+      <button type="button" class="ghost danger" id="absDel">Xoá ghi chú</button>
+      <span style="flex:1"></span>
+      <button type="button" class="ghost" data-close="mAbs">Huỷ</button>
+      <button type="button" class="ok" id="absSave">Lưu ghi chú</button>
+    </div>
+    <div id="absMsg" class="hint" style="margin-top:10px" role="alert"></div>
+  </div>
+</div>
+
+{% if tab == 'lop' %}
+<div class="modal" id="mSched" role="dialog" aria-modal="true" aria-label="Lịch học của lớp">
+  <div class="box">
+    <div class="panel-head" style="margin-bottom:8px">
+      <h3>Lịch học lớp <span id="scName"></span></h3>
+      <button type="button" class="ghost sm" data-close="mSched">Đóng</button>
+    </div>
+    <p class="sub">Số buổi/ngày quyết định học sinh được điểm danh tối đa mấy lần trong ngày.</p>
+    <div class="field">
+      <span class="lbl">Số buổi mỗi ngày</span>
+      <div class="seg" role="group" aria-label="Số buổi">
+        <button type="button" data-sc="1">1 buổi</button>
+        <button type="button" data-sc="2">2 buổi (sáng + chiều)</button>
+      </div>
+      <input type="hidden" id="scSessions" value="2">
+    </div>
+    <div class="grid g2" style="gap:12px">
+      <div class="field"><label for="scS1">Buổi sáng từ</label><input type="time" id="scS1"></div>
+      <div class="field"><label for="scE1">Buổi sáng tới</label><input type="time" id="scE1"></div>
+      <div class="field"><label for="scS2">Buổi chiều từ</label><input type="time" id="scS2"></div>
+      <div class="field"><label for="scE2">Buổi chiều tới</label><input type="time" id="scE2"></div>
+    </div>
+    <p class="hint" id="scHint"></p>
+    <div class="foot">
+      <button type="button" class="ghost" data-close="mSched">Huỷ</button>
+      <button type="button" class="ok" id="scSave">Lưu lịch học</button>
+    </div>
+    <div id="scMsg" class="hint" style="margin-top:10px" role="alert"></div>
+  </div>
+</div>
+
+<div class="modal" id="mRenCls" role="dialog" aria-modal="true" aria-label="Đổi tên lớp">
+  <div class="box">
+    <div class="panel-head" style="margin-bottom:8px">
+      <h3>Đổi tên lớp <span id="rcOld"></span></h3>
+      <button type="button" class="ghost sm" data-close="mRenCls">Đóng</button>
+    </div>
+    <div class="field">
+      <label for="rcNew">Tên mới</label>
+      <input type="text" id="rcNew" placeholder="VD: 12A2" autocomplete="off">
+      <p class="hint">Toàn bộ học sinh của lớp sẽ chuyển theo tên mới.</p>
+    </div>
+    <div class="foot">
+      <button type="button" class="ghost" data-close="mRenCls">Huỷ</button>
+      <button type="button" class="ok" id="rcSave">Đổi tên</button>
+    </div>
+    <div id="rcMsg" class="hint" style="margin-top:10px" role="alert"></div>
+  </div>
+</div>
+
+<div class="modal" id="mDelCls" role="dialog" aria-modal="true" aria-label="Xoá lớp">
+  <div class="box">
+    <h3>Xoá lớp <span id="dcName"></span></h3>
+    <p class="sub" id="dcInfo"></p>
+    <div class="field" style="margin-top:14px">
+      <label for="dcMove">Chuyển học sinh sang lớp nào trước khi xoá?</label>
+      <select id="dcMove"></select>
+      <p class="hint">Lớp đích sẽ được tạo tự động nếu chưa có.</p>
+    </div>
+    <div class="foot">
+      <button type="button" class="ghost" data-close="mDelCls">Huỷ</button>
+      <button type="button" class="danger" id="dcGo">Xoá lớp</button>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{% if tab == 'giao-vien' %}
+<div class="modal" id="mAssign" role="dialog" aria-modal="true" aria-label="Gán lớp cho giáo viên">
+  <div class="box">
+    <div class="panel-head" style="margin-bottom:8px">
+      <h3>Gán lớp — <span id="asName"></span></h3>
+      <button type="button" class="ghost sm" data-close="mAssign">Đóng</button>
+    </div>
+    <div class="field">
+      <span class="lbl">Lớp được dạy</span>
+      <div id="asList"></div>
+    </div>
+    <div class="foot">
+      <button type="button" class="ghost" data-close="mAssign">Huỷ</button>
+      <button type="button" class="ok" id="asSave">Lưu</button>
+    </div>
+    <div id="asMsg" class="hint" style="margin-top:10px" role="alert"></div>
+  </div>
+</div>
+{% endif %}
+{% endblock %}
+
+
+{% block scripts %}
+<script>
+var $ = function (id) { return document.getElementById(id); };
+var STUD = {{ js_studs }};
+var SNAME = {{ js_names }};
+var CLS = {{ cls_names }};
+var CLSS = {{ cls_dict }};
+var CLOS = {{ cls_all }};
+var TODAY = {{ today | tojson }};
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) {
+    return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c];
+  });
+}
+function toast(m, isErr) {
+  var t = $('toast'); t.textContent = m;
+  t.className = 'toast show' + (isErr ? ' err' : ' ok');
+  clearTimeout(t._h);
+  t._h = setTimeout(function () { t.className = 'toast'; }, 3200);
+}
+function api(url, opt) {
+  return fetch(url, opt).then(function (r) {
+    return r.json().catch(function () { return null; }).then(function (d) {
+      if (!r.ok || (d && d.ok === false))
+        throw new Error((d && d.error) || ('Lỗi ' + r.status));
+      return d;
+    });
+  });
+}
+function closeModal(id) { var m = $(id); if (m) m.classList.remove('open'); }
+function openModal(id) {
+  var m = $(id); if (!m) return;
+  m.classList.add('open');
+  var f = m.querySelector('input[type="text"], input[type="date"], select, button');
+  if (f && f.tagName === 'INPUT') f.focus();
+}
+document.addEventListener('click', function (e) {
+  Array.prototype.forEach.call(document.querySelectorAll('.modal.open'), function (m) {
+    if (e.target === m) m.classList.remove('open');
+  });
+});
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape') {
+    Array.prototype.forEach.call(document.querySelectorAll('.modal.open'), function (m) {
+      m.classList.remove('open');
+    });
+  }
+});
+Array.prototype.forEach.call(document.querySelectorAll('[data-close]'), function (b) {
+  b.addEventListener('click', function () { closeModal(b.getAttribute('data-close')); });
+});
+
+/* Đọc file -> dataURL để gửi JSON (đăng ký / thêm mẫu) */
+function readFiles(files) {
+  return Promise.all(Array.prototype.map.call(files, function (f) {
+    return new Promise(function (res, rej) {
+      var r = new FileReader();
+      r.onload = function () { res(r.result); };
+      r.onerror = function () { rej(new Error('Không đọc được file ' + f.name)); };
+      r.readAsDataURL(f);
+    });
+  }));
+}
+function previewFiles(input, box) {
+  box.innerHTML = '';
+  Array.prototype.forEach.call(input.files, function (f) {
+    if (!/^image\//.test(f.type)) return;
+    var img = document.createElement('img');
+    img.className = 'pop';
+    img.title = f.name;
+    img.src = URL.createObjectURL(f);
+    img.onload = function () { URL.revokeObjectURL(img.src); };
+    box.appendChild(img);
+  });
+}
+
+/* ================= ĐĂNG KÝ (tab dang-ky) ================= */
+if ($('regFile')) {
+  $('regFile').addEventListener('change', function () { previewFiles(this, $('regPrev')); });
+}
+if ($('regForm')) {
+  $('regForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var name = $('regName').value.trim();
+    var dob = $('regDob').value;
+    var cls = $('regCls').value;
+    var files = $('regFile').files;
+    if (!name) { toast('Nhập họ và tên', true); return; }
+    if (!dob) { toast('Nhập ngày sinh', true); return; }
+    if (!files.length) { toast('Chọn ảnh khuôn mặt tải lên', true); return; }
+    if (files.length > 8) { toast('Mỗi lần tối đa 8 ảnh', true); return; }
+    $('regMsg').textContent = 'Đang đăng ký...';
+    readFiles(files).then(function (images) {
+      return api('/api/students', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({full_name: name, date_of_birth: dob, class_name: cls, images: images})
+      });
+    }).then(function (d) {
+      toast('Đã đăng ký ' + name + ' với ' + d.samples + ' mẫu khuôn mặt', false);
+      setTimeout(function () { location.reload(); }, 700);
+    }).catch(function (err) {
+      $('regMsg').textContent = 'Không đăng ký được: ' + err.message;
+    });
+  });
+}
+
+/* ================= THÊM MẪU / XOÁ MẪU ================= */
+var faceId = null, faceName = '';
+Array.prototype.forEach.call(document.querySelectorAll('[data-face]'), function (b) {
+  b.addEventListener('click', function () {
+    faceId = b.getAttribute('data-face');
+    faceName = b.getAttribute('data-name') || ('ID ' + faceId);
+    $('faceTitle').textContent = 'Thêm mẫu — ' + faceName;
+    $('faceFile').value = '';
+    $('faceMsg').textContent = '';
+    openModal('mFace');
+  });
+});
+if ($('faceAdd')) {
+  $('faceAdd').addEventListener('click', function () {
+    var files = $('faceFile').files;
+    if (!files.length) { toast('Chọn ảnh trước', true); return; }
+    if (files.length > 8) { toast('Mỗi lần tối đa 8 ảnh', true); return; }
+    $('faceMsg').textContent = 'Đang tải lên...';
+    readFiles(files).then(function (images) {
+      return api('/api/students/' + faceId + '/samples', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({images: images})
+      });
+    }).then(function (d) {
+      if (d.added === 0) {
+        $('faceMsg').textContent = d.note || 'Không thêm được mẫu nào.';
+      } else {
+        toast('Đã thêm ' + d.added + ' mẫu cho ' + faceName, false);
+        setTimeout(function () { location.reload(); }, 700);
+      }
+    }).catch(function (err) {
+      $('faceMsg').textContent = 'Không thêm được: ' + err.message;
+    });
+  });
+}
+if ($('faceReset')) {
+  $('faceReset').addEventListener('click', function () {
+    if (!confirm('Xoá toàn bộ mẫu khuôn mặt của "' + faceName + '"?\nNgười này sẽ không nhận diện được cho tới khi đăng ký lại ảnh.')) return;
+    api('/api/students/' + faceId + '/reset-face', {method: 'POST'}).then(function () {
+      toast('Đã xoá mẫu cũ — hãy thêm lại ảnh', false);
+      setTimeout(function () { location.reload(); }, 700);
+    }).catch(function (e) { $('faceMsg').textContent = 'Không xoá được: ' + e.message; });
+  });
+}
+
+/* ================= SỬA THÔNG TIN ================= */
+var editId = null;
+Array.prototype.forEach.call(document.querySelectorAll('[data-edit]'), function (b) {
+  b.addEventListener('click', function () {
+    editId = b.getAttribute('data-edit');
+    api('/api/students/' + editId).then(function (d) {
+      var s = d.student;
+      $('edName').value = s.full_name;
+      $('edDob').value = s.date_of_birth;
+      $('edCls').value = s.class_name;
+      $('edMsg').textContent = '';
+      openModal('mEdit');
+    }).catch(function (e) { toast(e.message, true); });
+  });
+});
+if ($('edSave')) {
+  $('edSave').addEventListener('click', function () {
+    var name = $('edName').value.trim();
+    if (!name) { toast('Nhập họ và tên', true); return; }
+    api('/api/students/' + editId, {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({full_name: name, date_of_birth: $('edDob').value,
+                            class_name: $('edCls').value})
+    }).then(function () {
+      toast('Đã lưu', false); setTimeout(function () { location.reload(); }, 600);
+    }).catch(function (e) { $('edMsg').textContent = 'Không lưu được: ' + e.message; });
+  });
+}
+
+/* ================= XOÁ HỌC SINH ================= */
+Array.prototype.forEach.call(document.querySelectorAll('[data-del]'), function (b) {
+  b.addEventListener('click', function () {
+    if (!confirm('Xoá học sinh "' + b.getAttribute('data-name') + '"?\nToàn bộ ảnh khuôn mặt và lịch sử điểm danh sẽ mất.')) return;
+    api('/api/students/' + b.getAttribute('data-del'), {method: 'DELETE'}).then(function () {
+      toast('Đã xoá', false); setTimeout(function () { location.reload(); }, 600);
+    }).catch(function (e) { toast(e.message, true); });
+  });
+});
+
+/* ================= XEM SỐ NGÀY ĐÃ ĐI HỌC ================= */
+Array.prototype.forEach.call(document.querySelectorAll('[data-att]'), function (b) {
+  b.addEventListener('click', function () {
+    openModal('mAtt');
+    $('attBody').innerHTML = '<div class="muted">Đang tải…</div>';
+    api('/api/students/' + b.getAttribute('data-att') + '/attendance').then(function (d) {
+      var s = d.student, a = d.attendance;
+      var html = '<p><b style="font-size:16px">' + esc(s.full_name) + '</b> ' +
+        '<span class="badge info">' + esc(s.class_name) + '</span></p>' +
+        '<div class="stat" style="margin:12px 0"><span class="k">Đã đi học</span><span class="v">' + a.days + '</span><span class="n">ngày có điểm danh</span></div>';
+      if (!a.detail.length) {
+        html += '<div class="empty">Chưa có ngày điểm danh nào.</div>';
+      } else {
+        html += '<div class="tablewrap scroll"><table><thead><tr><th>Ngày</th><th>Buổi</th><th>Vào</th><th>Ra</th></tr></thead><tbody>';
+        a.detail.forEach(function (x) {
+          html += '<tr><td><b>' + esc(x.day) + '</b></td><td>' +
+            (x.sessions || [1]).map(function (n) { return n === 1 ? 'Sáng' : 'Chiều'; }).join(', ') +
+            '</td><td class="muted">' + esc((x.first_seen || '').slice(11, 16)) + '</td>' +
+            '<td class="muted">' + esc((x.last_seen || '').slice(11, 16)) + '</td></tr>';
+        });
+        html += '</tbody></table></div>';
+      }
+      $('attBody').innerHTML = html;
+    }).catch(function (e) {
+      $('attBody').innerHTML = '<div class="notice error">Không tải được: ' + esc(e.message) + '</div>';
+    });
+  });
+});
+
+/* ================= GHI CHÚ NGHỈ (hom-nay + diem-danh) ================= */
+function openAbs(sid, day, name, state) {
+  $('absSid').value = sid;
+  $('absDay').value = day;
+  $('absTitle').textContent = name + ' — ' + day;
+  $('absInfo').textContent = state === 'has'
+    ? 'Đã điểm danh ngày này. Ghi chú sẽ ghi thành nghỉ cho ngày.'
+    : (state === 'none' ? 'Ngày chưa tới — không cần ghi chú.'
+       : 'Chưa điểm danh đầy đủ. Hãy ghi lý do nghỉ.');
+  $('absReason').value = '';
+  $('absMsg').textContent = '';
+  $('absDel').style.display = state === 'leave' ? '' : 'none';
+  $('absSave').style.display = state === 'none' ? 'none' : '';
+  openModal('mAbs');
+}
+Array.prototype.forEach.call(document.querySelectorAll('.daygrid [data-sid]'), function (d) {
+  d.addEventListener('click', function () {
+    openAbs(d.getAttribute('data-sid'), d.getAttribute('data-day'),
+            d.getAttribute('data-name'), d.getAttribute('data-state'));
+  });
+});
+Array.prototype.forEach.call(document.querySelectorAll('[data-abs]'), function (b) {
+  b.addEventListener('click', function () {
+    openAbs(b.getAttribute('data-abs'), b.getAttribute('data-day') || TODAY,
+            b.getAttribute('data-name'), b.getAttribute('data-state'));
+  });
+});
+function rememberCell() {
+  try { sessionStorage.setItem('flashCell', $('absSid').value + '|' + $('absDay').value); } catch (e) {}
+}
+function flashSavedCell() {
+  try {
+    var raw = sessionStorage.getItem('flashCell');
+    if (!raw) return;
+    sessionStorage.removeItem('flashCell');
+    var p = raw.split('|');
+    if (!/^\d+$/.test(p[0] || '') || !/^\d{4}-\d{2}-\d{2}$/.test(p[1] || '')) return;
+    var cell = document.querySelector('.daygrid [data-sid="' + p[0] + '"][data-day="' + p[1] + '"]');
+    if (!cell) return;
+    cell.classList.add('flash');
+    cell.scrollIntoView({block: 'nearest', behavior: 'smooth'});
+  } catch (e) {}
+}
+flashSavedCell();
+if ($('absSave')) {
+  $('absSave').addEventListener('click', function () {
+    var reason = $('absReason').value.trim();
+    if (!reason) { toast('Nhập lý do nghỉ', true); return; }
+    api('/api/absences', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({student_id: +$('absSid').value, day: $('absDay').value, reason: reason})
+    }).then(function () {
+      rememberCell();
+      toast('Đã lưu ghi chú', false); setTimeout(function () { location.reload(); }, 500);
+    }).catch(function (e) { $('absMsg').textContent = 'Không lưu được: ' + e.message; });
+  });
+}
+if ($('absDel')) {
+  $('absDel').addEventListener('click', function () {
+    api('/api/absences?student_id=' + $('absSid').value + '&day=' + $('absDay').value, {method: 'DELETE'})
+    .then(function () {
+      rememberCell();
+      toast('Đã xoá ghi chú', false); setTimeout(function () { location.reload(); }, 500);
+    }).catch(function (e) { $('absMsg').textContent = 'Không xoá được: ' + e.message; });
+  });
+}
+
+/* ================= LỚP: THÊM / ĐỔI TÊN / LỊCH HỌC / XOÁ ================= */
+if ($('addCls')) {
+  $('addCls').addEventListener('click', function () {
+    var name = $('nc').value.trim();
+    if (!name) { toast('Nhập tên lớp', true); return; }
+    api('/api/classes', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: name})
+    }).then(function () {
+      toast('Đã thêm lớp', false); setTimeout(function () { location.reload(); }, 600);
+    }).catch(function (e) { $('addMsg').textContent = 'Không thêm được: ' + e.message; });
+  });
+}
+
+var SCHED = {};
+{% if tab == 'lop' %}{% for c in classes %}SCHED[{{ c.name | tojson }}] = {{ c.schedule | tojson }};
+{% endfor %}{% endif %}
+var schedCls = '';
+Array.prototype.forEach.call(document.querySelectorAll('[data-sched]'), function (b) {
+  b.addEventListener('click', function () {
+    schedCls = b.getAttribute('data-sched');
+    var s = SCHED[schedCls] || {};
+    $('scName').textContent = schedCls;
+    $('scSessions').value = String(s.sessions || 2);
+    $('scS1').value = s.sang_start || '05:00';
+    $('scE1').value = s.sang_end || '11:59';
+    $('scS2').value = s.chieu_start || '12:00';
+    $('scE2').value = s.chieu_end || '23:59';
+    $('scMsg').textContent = '';
+    paintSchedSeg();
+    openModal('mSched');
+  });
+});
+function paintSchedSeg() {
+  var n = $('scSessions').value;
+  Array.prototype.forEach.call(document.querySelectorAll('[data-sc]'), function (btn) {
+    btn.classList.toggle('on', btn.getAttribute('data-sc') === n);
+  });
+  $('scHint').textContent = n === '1'
+    ? 'Một buổi: học sinh chỉ điểm danh 1 lần/ngày.'
+    : 'Hai buổi: tối đa 2 lần/ngày (một lần buổi sáng, một lần buổi chiều) — bấm nút bao nhiêu lần trong buổi cũng chỉ tính 1.';
+}
+Array.prototype.forEach.call(document.querySelectorAll('[data-sc]'), function (btn) {
+  btn.addEventListener('click', function () {
+    $('scSessions').value = btn.getAttribute('data-sc');
+    paintSchedSeg();
+  });
+});
+if ($('scSave')) {
+  $('scSave').addEventListener('click', function () {
+    api('/api/classes/' + encodeURIComponent(schedCls) + '/schedule', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({sessions: +$('scSessions').value,
+        sang_start: $('scS1').value, sang_end: $('scE1').value,
+        chieu_start: $('scS2').value, chieu_end: $('scE2').value})
+    }).then(function () {
+      toast('Đã lưu lịch học', false); setTimeout(function () { location.reload(); }, 600);
+    }).catch(function (e) { $('scMsg').textContent = 'Không lưu được: ' + e.message; });
+  });
+}
+
+var renCls = '';
+Array.prototype.forEach.call(document.querySelectorAll('[data-rencls]'), function (b) {
+  b.addEventListener('click', function () {
+    renCls = b.getAttribute('data-rencls');
+    $('rcOld').textContent = renCls;
+    $('rcNew').value = renCls;
+    $('rcMsg').textContent = '';
+    openModal('mRenCls');
+  });
+});
+if ($('rcSave')) {
+  $('rcSave').addEventListener('click', function () {
+    api('/api/classes/' + encodeURIComponent(renCls) + '/rename', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({name: $('rcNew').value.trim()})
+    }).then(function () {
+      toast('Đã đổi tên lớp', false); setTimeout(function () { location.reload(); }, 600);
+    }).catch(function (e) { $('rcMsg').textContent = 'Không đổi được: ' + e.message; });
+  });
+}
+
+Array.prototype.forEach.call(document.querySelectorAll('[data-delcls]'), function (b) {
+  b.addEventListener('click', function () {
+    var name = b.getAttribute('data-delcls');
+    $('dcName').textContent = name;
+    $('dcInfo').textContent = 'Lớp ' + name + ' đang có ' + b.getAttribute('data-n') +
+      ' học sinh — cần chuyển học sinh sang lớp khác trước khi xoá.';
+    $('dcMove').innerHTML = CLSS.filter(function (c) { return c !== name; }).map(function (c) {
+      return '<option value="' + esc(c) + '">' + esc(c) + '</option>';
+    }).join('') || '<option value="">—</option>';
+    openModal('mDelCls');
+  });
+});
+if ($('dcGo')) {
+  $('dcGo').addEventListener('click', function () {
+    var name = $('dcName').textContent, move = $('dcMove').value;
+    if (!move) { toast('Chọn lớp để chuyển học sinh sang', true); return; }
+    api('/api/classes/' + encodeURIComponent(name) + '?move_to=' + encodeURIComponent(move), {method: 'DELETE'})
+    .then(function (d) {
+      toast('Đã xoá lớp ' + name + ', chuyển ' + d.deleted.moved + ' học sinh sang ' + move, false);
+      setTimeout(function () { location.reload(); }, 800);
+    }).catch(function (e) { toast(e.message, true); });
+  });
+}
+
+/* ================= GIÁO VIÊN ================= */
+if ($('tvForm')) {
+  $('tvForm').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var classes = Array.prototype.map.call(
+      document.querySelectorAll('.tvCls:checked'), function (c) { return c.value; });
+    api('/api/teachers', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username: $('tvUser').value.trim(),
+        password: $('tvPass').value, full_name: $('tvFull').value.trim(),
+        classes: classes})
+    }).then(function () {
+      toast('Đã tạo tài khoản', false); setTimeout(function () { location.reload(); }, 700);
+    }).catch(function (e) { $('tvMsg').textContent = 'Không tạo được: ' + e.message; });
+  });
+}
+var TCLS = {};
+{% if tab == 'giao-vien' %}{% for t in teachers %}TCLS[{{ t.id }}] = {{ t.classes | tojson }};
+{% endfor %}{% endif %}
+var asId = null;
+Array.prototype.forEach.call(document.querySelectorAll('[data-assign]'), function (b) {
+  b.addEventListener('click', function () {
+    asId = b.getAttribute('data-assign');
+    var mine = TCLS[asId] || [];
+    $('asName').textContent = b.getAttribute('data-name');
+    $('asList').innerHTML = CLOS.map(function (c) {
+      return '<label class="check"><input type="checkbox" class="asCls" value="' + esc(c) + '"' +
+        (mine.indexOf(c) >= 0 ? ' checked' : '') + '> Lớp ' + esc(c) + '</label>';
+    }).join('') || '<p class="hint">Chưa có lớp nào — thêm lớp ở tab Lớp &amp; lịch học.</p>';
+    $('asMsg').textContent = '';
+    openModal('mAssign');
+  });
+});
+if ($('asSave')) {
+  $('asSave').addEventListener('click', function () {
+    var classes = Array.prototype.map.call(
+      document.querySelectorAll('.asCls:checked'), function (c) { return c.value; });
+    api('/api/teachers/' + asId + '/classes', {
+      method: 'PUT', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({classes: classes})
+    }).then(function () {
+      toast('Đã lưu lớp dạy', false); setTimeout(function () { location.reload(); }, 600);
+    }).catch(function (e) { $('asMsg').textContent = 'Không lưu được: ' + e.message; });
+  });
+}
+Array.prototype.forEach.call(document.querySelectorAll('[data-delteacher]'), function (b) {
+  b.addEventListener('click', function () {
+    if (!confirm('Xoá tài khoản giáo viên "' + b.getAttribute('data-name') + '"?')) return;
+    api('/api/teachers/' + b.getAttribute('data-delteacher'), {method: 'DELETE'}).then(function () {
+      toast('Đã xoá tài khoản', false); setTimeout(function () { location.reload(); }, 600);
+    }).catch(function (e) { toast(e.message, true); });
+  });
+});
+</script>
+{% endblock %}

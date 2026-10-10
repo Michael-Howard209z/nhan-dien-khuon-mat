@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block title %}Đăng nhập — Điểm danh khuôn mặt{% endblock %}
+
+{% block content %}
+<div class="auth">
+  <div class="auth-head">
+    <h1>Đăng nhập hệ thống</h1>
+    <p class="lede">Một trang đăng nhập duy nhất cho mọi vai trò — nhập tên đăng nhập
+      và mật khẩu, hệ thống tự đưa bạn tới đúng trang.</p>
+    {% if notice %}
+    <div class="notice ok" role="status" style="margin-top:16px">{{ notice }}</div>
+    {% endif %}
+  </div>
+
+  <section class="panel auth-panel" style="max-width:440px;margin:0 auto">
+    <form method="post" action="{{ url_for('dang_nhap') }}">
+      <div class="field">
+        <label for="u">Tên đăng nhập</label>
+        <input type="text" id="u" name="username" placeholder="VD: admin, giangvien..."
+               required autocomplete="username" autofocus autocapitalize="none"
+               spellcheck="false">
+      </div>
+      <div class="field">
+        <label for="p">Mật khẩu</label>
+        <input type="password" id="p" name="password" placeholder="Mật khẩu của bạn"
+               required autocomplete="current-password">
+      </div>
+      {% if error %}
+      <div class="notice error" role="alert">{{ error }}</div>
+      {% endif %}
+      <button class="block ok" type="submit">Đăng nhập</button>
+    </form>
+
+    <p class="hint" style="margin-top:14px">
+      Tài khoản hệ thống: <span class="kbd">admin</span> (Quản trị),
+      <span class="kbd">developer</span> (Phát triển — debug camera).
+      Tài khoản giáo viên do quản trị viên tạo.
+    </p>
+  </section>
+</div>
+{% endblock %}

@@ -1,0 +1,33 @@
+==================================================================
+  Server nhan dien khuon mat dang chay tren HAI cong
+==================================================================
+  Cau hinh     : C:\Users\Administrator\Desktop\nhan-dien-khuon-mat-main\.env
+  Camera       : http://192.168.1.7:4747/video
+  Phat hien    : yunet (can theo diem moc)
+  Nhan dang    : sface - nguong 0.42 (cosine) + nguong rieng/nguoi
+  Theo doi     : bat (medianflow), chot ten sau 3 khung, giu toi da 12 khung
+  So nguoi     : 1 (10 mau)
+------------------------------------------------------------------
+  CONG CAMERA  : http://localhost:5001   (trang camera truc tiep)
+  CONG QUAN LY : http://localhost:5000   (chon vai tro)
+  API ESP32    : POST http://<ip-may>:5001/api/esp32/frame
+==================================================================
+127.0.0.1 - - [04/Oct/2026 12:56:30] "GET /api/status HTTP/1.1" 200 -
+127.0.0.1 - - [04/Oct/2026 12:56:30] "GET /api/log?limit=25 HTTP/1.1" 200 -
+127.0.0.1 - - [04/Oct/2026 12:56:30] "GET /api/students HTTP/1.1" 200 -
+127.0.0.1 - - [04/Oct/2026 12:56:31] "GET / HTTP/1.1" 200 -
+127.0.0.1 - - [04/Oct/2026 12:56:31] "GET /video_feed HTTP/1.1" 200 -
+127.0.0.1 - - [04/Oct/2026 12:56:31] "GET /static/style.css HTTP/1.1" 304 -
+127.0.0.1 - - [04/Oct/2026 12:56:31] "GET /api/config HTTP/1.1" 200 -
+127.0.0.1 - - [04/Oct/2026 12:56:31] "GET /api/log?limit=25 HTTP/1.1" 200 -
+127.0.0.1 - - [04/Oct/2026 12:56:31] "GET /api/status HTTP/1.1" 200 -
+127.0.0.1 - - [04/Oct/2026 12:56:31] "GET /api/students HTTP/1.1" 200 -
+127.0.0.1 - - [04/Oct/2026 12:56:32] "GET /api/status HTTP/1.1" 200 -
+127.0.0.1 - - [04/Oct/2026 12:56:34] "GET /api/status HTTP/1.1" 200 -
+127.0.0.1 - - [04/Oct/2026 12:56:35] "GET /api/status HTTP/1.1" 200 -
+127.0.0.1 - - [04/Oct/2026 12:56:36] "GET /api/log?limit=25 HTTP/1.1" 200 -
+127.0.0.1 - - [04/Oct/2026 12:56:37] "GET /api/status HTTP/1.1" 200 -
+127.0.0.1 - - [04/Oct/2026 12:56:38] "GET /api/status HTTP/1.1" 200 -
+127.0.0.1 - - [04/Oct/2026 12:56:40] "GET /api/status HTTP/1.1" 200 -
+127.0.0.1 - - [04/Oct/2026 12:56:41] "GET /api/log?limit=25 HTTP/1.1" 200 -
+127.0.0.1 - - [04/Oct/2026 12:56:41] "GET /api/status HTTP/1.1" 200 -

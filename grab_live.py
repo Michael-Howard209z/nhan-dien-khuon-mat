@@ -5,7 +5,7 @@ import requests
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
-with requests.get("http://127.0.0.1:5000/video_feed", stream=True, timeout=10) as r:
+with requests.get("http://127.0.0.1:5001/video_feed", stream=True, timeout=10) as r:
     buf = b""
     for chunk in r.iter_content(4096):
         buf += chunk
