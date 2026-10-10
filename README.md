@@ -2,9 +2,10 @@
 
 Hệ thống điểm danh bằng khuôn mặt cho trường học:
 
-- **Điểm danh bằng nút bấm trên ESP32-CAM:** học sinh nhấn nút → thiết bị chụp 1 ảnh
-  + bật flash → `POST /api/esp32/frame?capture=1` → server nhận diện, ghi điểm danh
-  **theo buổi** (sáng/chiều) → ESP32 nháy LED báo kết quả rồi **tắt camera**.
+- **Điểm danh bằng nút bấm trên ESP32-CAM:** học sinh nhấn nút → thiết bị quét liên
+  tục tối đa 15 giây (giữ flash sáng, POST từng khung lên server, trúng là dừng
+  sớm) → server nhận diện, ghi điểm danh **theo buổi** (sáng/chiều) → ESP32 nháy
+  LED báo kết quả rồi **tắt camera**.
 - **Đăng ký khuôn mặt:** giáo viên / quản trị **upload ảnh lên** (không chụp tại camera).
 - **Một trang đăng nhập duy nhất** (`:5000`) — server tự điều hướng theo vai trò:
   **admin** (quản trị toàn trường) · **teacher** (giáo viên, chỉ lớp được gán) ·
@@ -44,29 +45,34 @@ Không tải được model SFace? hệ thống tự chuyển sang **LBPH** cũ 
 [Học sinh bấm nút trên ESP32-CAM]
    │  (BUTTON_PIN=13, kéo nội lên, kích mức thấp)
    ▼
-ESP32: bật flash → khởi động camera → chụp 1 ảnh JPEG
+ESP32: khởi động camera → bật flash (giữ SÁNG suốt phiên quét = tín hiệu "đang quét")
    │
    ▼
-POST http://<ip-may>:5001/api/esp32/frame?capture=1   (multipart, field "file")
+Quét tối đa 15 giây (~2–3 khung/giây):
+  mỗi khung → POST http://<ip-may>:5001/api/esp32/frame?capture=1 (multipart, field "file")
+    → server nhận diện khung đó → trả JSON ngay
+    → TRÚNG (matched ≥ 1) → DỪNG SỚM, không cần hết 15 giây
    │
    ▼
 Server: nhận diện → tìm trong DB → ghi điểm danh 1 dòng cho BUỔI hiện tại
    │        (lớp 1 buổi/ngày → luôn buổi 1; lớp 2 buổi → theo khung giờ)
+   │        (khung lặp lại trong cùng buổi → server tự loại trùng, trả already:true)
    ▼
 Trả JSON: {ok, matched, already, full_name, class_name, session, session_name, results}
    │
    ▼
-ESP32: nháy LED báo kết quả → giữ cam thêm 1,5 s → TẮT camera (sensor power down)
+ESP32: tắt flash → nháy LED báo kết quả → giữ cam thêm 1,5 s → TẮT camera (sensor power down)
 ```
 
 ### Ý nghĩa nháy LED
 
 | Mẫu nháy | Ý nghĩa |
 |---|---|
+| Flash **sáng liên tục** | Đang quét (tối đa 15 giây) — đứng yên trước camera |
 | **1 nháy dài ~800 ms** | Điểm danh OK (`matched ≥ 1, already:false`) |
 | **2 nháy vừa ~300 ms** | Đã nhận ra nhưng **đã điểm danh buổi này rồi** (`already:true`) |
-| **3 nháy ngắn ~120 ms** | Không thấy mặt / không khớp ai (`matched:0`) |
-| **5 nháy nhanh ~60 ms** | Lỗi mạng / lỗi server |
+| **3 nháy ngắn ~120 ms** | Hết 15 giây mà không thấy mặt / không khớp ai |
+| **5 nháy nhanh ~60 ms** | Lỗi mạng / lỗi server / POST lỗi liên tiếp |
 
 ### Điểm danh theo buổi — tối đa 1 lần/buổi
 
@@ -353,17 +359,21 @@ Tab lạ → về tab đầu tiên của vai trò.
 
 | Biến trong `.ino` | Mặc định | Ý nghĩa |
 |---|---|---|
-| `BUTTON_ENABLE` | `1` | Bật chế độ 1 nút = 1 lần điểm danh |
+| `BUTTON_ENABLE` | `1` | Bật chế độ nút nhấn = 1 phiên quét điểm danh |
 | `BUTTON_PIN` | `13` | GPIO nút (INPUT_PULLUP, kích mức thấp; **cấm** GPIO 12/16/17/4/0/1/3/2) |
+| `BUTTON_SCAN_SECONDS` | `15` | Quét tối đa từng đó giây mỗi lần bấm (trúng là dừng sớm) |
+| `BUTTON_POST_GAP_MS` | `300` | Nghỉ giữa 2 khung POST (~2–3 khung/giây) |
+| `BUTTON_MAX_FAILS` | `3` | POST lỗi liên tiếp quá mức này → báo 5 nháy, dừng quét |
 | `PUSH_URL` | `http://<ip-may>:5001/api/esp32/frame` | Server nhận ảnh (`:5001` = `CAMERA_PORT`) |
-| `CAM_OFF_DELAY_MS` | `1500` | Giữ cam sau khi gửi xong rồi **tắt sensor** (PWDN HIGH) |
-| Flash | GPIO đèn flash | Tự bật khi chụp, tắt ngay sau khi POST xong |
+| `CAM_OFF_DELAY_MS` | `1500` | Giữ cam sau khi quét xong rồi **tắt sensor** (PWDN HIGH) |
+| Flash | GPIO đèn flash | Giữ SÁNG suốt phiên quét (vừa chiếu sáng vừa báo "đang quét") |
 | LED báo | GPIO4 (ledcWrite, fallback GPIO33) | Nháy theo kết quả (bảng mục 2) |
 
-Luồng firmware: đánh thức camera (`camWake`) → flash 250 ms → chụp →
-`POST PUSH_URL?capture=1` (multipart, field `file`, boundary `esp32cam`) →
-parse JSON trả về bằng `strstr` (key ASCII, không cần thư viện JSON) → nháy LED →
-`camSleep`. Camera **không khởi động lúc boot** — chỉ bật khi có người bấm nút.
+Luồng firmware: đánh thức camera (`camWake`) → flash 250 ms → lặp chụp +
+`POST PUSH_URL?capture=1` (multipart, field `file`, boundary `esp32cam`, tối đa
+15 giây, trúng là dừng) → parse JSON trả về bằng `strstr` (key ASCII, không cần
+thư viện JSON) → tắt flash → nháy LED → `camSleep`. Camera **không khởi động lúc
+boot** — chỉ bật khi có người bấm nút.
 
 Phản hồi của server (JSON top-level, key tiếng Việt ở giá trị):
 

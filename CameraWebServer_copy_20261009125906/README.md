@@ -2,13 +2,14 @@
 
 Thư mục này là firmware ESP32-CAM đã tích hợp sẵn với server Python ở thư mục gốc
 (`server.py`). Gồm mẫu `CameraWebServer` của Espressif + **chế độ nút nhấn** (mặc định):
-nút bấm → chụp 1 ảnh → POST lên server điểm danh → LED báo kết quả → tắt camera.
+nhấn nút → quét liên tục tối đa 15 giây (POST từng khung lên server, trúng là dừng
+sớm) → LED báo kết quả → tắt camera.
 
 ## 1. Chế độ hoạt động (chọn 1 trong 3)
 
 | Chế độ | ESP32 (`.ino`) | Server (`.env` / web) | Khi nào dùng |
 |---|---|---|---|
-| **BUTTON — nút nhấn (mặc định)** | `BUTTON_ENABLE = 1` | Không cần `STREAM_URL`; ESP32 POST `PUSH_URL?capture=1` mỗi lần bấm | Chạy thật: 1 nút = 1 lần chấm công, cam OFF khi nghỉ |
+| **BUTTON — nút nhấn (mặc định)** | `BUTTON_ENABLE = 1` | Không cần `STREAM_URL`; ESP32 POST `PUSH_URL?capture=1` liên tục tối đa 15 s mỗi lần bấm (trúng là dừng sớm) | Chạy thật: 1 nút = 1 phiên quét điểm danh, cam OFF khi nghỉ |
 | **PULL** | `BUTTON_ENABLE = 0`, `PUSH_ENABLE = 0` | `STREAM_URL = http://<ip-esp32>:81/stream` | Test nhanh 1 cam, không sửa firmware nhiều |
 | **PUSH** (liên tục) | `BUTTON_ENABLE = 0`, `PUSH_ENABLE = 1`, `PUSH_MODE_MJPEG = 0`, `PUSH_URL = http://<ip-may>:5001/api/esp32/frame` | Không cần `STREAM_URL` | Nhiều cam, NAT, hoặc muốn cam chủ động đẩy liên tục |
 
@@ -32,13 +33,19 @@ nút bấm → chụp 1 ảnh → POST lên server điểm danh → LED báo k�
 - Nút và server phải ở trạng thái bình thường; nút chỉ có tác dụng khi ESP32 đã kết nối WiFi
   (firmware kết nối WiFi ngay khi boot, có vòng lặp chờ).
 
-### Luồng 1 lần bấm
+### Luồng 1 lần bấm (quét tối đa 15 giây)
 
 1. `camWake()` — bật nguồn sensor (PWDN GPIO32 = LOW) + `esp_camera_init` (nếu đang OFF).
-2. Bật flash → chờ 250 ms (sensor cần LED sáng trước khi bấm) → chụp **1 JPEG** → tắt flash.
-3. `POST PUSH_URL?capture=1` — multipart/form-data, field `file`, boundary `esp32cam`
-   (cùng đúng định dạng `push_post_frame()` cũ).
-4. Đọc body JSON phản hồi, nháy LED theo kết quả + in log Serial (ASCII).
+2. Bật flash → chờ 250 ms (sensor cần LED sáng trước khi chụp) → **giữ flash SÁNG
+   suốt phiên quét** (ánh sáng ổn định, đồng thời là tín hiệu "đang quét").
+3. Lặp (~2–3 khung/giây, tối đa `BUTTON_SCAN_SECONDS` = 15 giây):
+   chụp 1 JPEG → `POST PUSH_URL?capture=1` (multipart/form-data, field `file`,
+   boundary `esp32cam`) → đọc JSON phản hồi ngay.
+   - `matched ≥ 1, already:false` → điểm danh OK → **dừng sớm**, 1 nháy dài.
+   - `matched ≥ 1, already:true` → đã điểm danh buổi này → **dừng sớm**, 2 nháy.
+   - Chưa khớp → quét tiếp; log Serial in `khung N: chua khop, quet tiep...`.
+   - POST lỗi liên tiếp `BUTTON_MAX_FAILS` (3) lần → dừng, 5 nháy.
+4. Tắt flash → nháy LED theo kết quả + in log Serial (ASCII).
 5. Giữ cam bật thêm `CAM_OFF_DELAY_MS` (1500 ms) rồi `esp_camera_deinit` + PWDN = HIGH (tắt sensor).
 
 ### Ý nghĩa nháy LED (sau mỗi lần bấm)
@@ -48,7 +55,7 @@ nút bấm → chụp 1 ảnh → POST lên server điểm danh → LED báo k�
 | **Sáng cố định ~1,5 s khi boot** | Firmware đã chạy, sẵn sàng (khác mọi mẫu nháy kết quả) |
 | **1 nháy dài ~800 ms** | Điểm danh OK — log Serial in `[BTN] Diem danh OK: <họ tên>` |
 | **2 nháy vừa ~300 ms** | Đã nhận diện được nhưng **đã điểm danh rồi** trong buổi này (`already:true`) |
-| **3 nháy ngắn ~120 ms** | Không thấy mặt / không khớp ai (`matched:0`) |
+| **3 nháy ngắn ~120 ms** | Hết 15 giây quét mà không thấy mặt / không khớp ai (`matched:0` mọi khung) |
 | **5 nháy nhanh ~60 ms** | Lỗi mạng / lỗi server (connect fail, HTTP != 2xx, **hoặc WiFi chưa kết nối**) |
 
 > **WiFi chưa lên thì sau 20 s firmware vẫn chạy tiếp** (không treo trong setup):
@@ -82,7 +89,7 @@ Web server trên cổng 80 **vẫn chạy** trong chế độ nút nhấn để 
 ## 4. Cấu hình khuyến dùng cho nhận diện
 
 - Độ phân giải: **VGA 640×480** (nhận xa hơn). Mặc định firmware là QVGA 320×240
-  (siêu mượt) — chế độ nút nhấn chỉ chụp 1 ảnh/lần nên dư sức chạy VGA.
+  (siêu mượt) — chế độ nút nhấn quét ~2–3 khung/giây trong tối đa 15 s nên dư sức chạy VGA.
 - Chất lượng JPEG: `12` (10 = nét, 20+ = nhẹ/nhanh).
 - Server: có thể hạ `MIN_FACE_SIZE` xuống `24–32` nếu mặt vẫn nhỏ, tăng `DETECT_SCORE`
   nếu nhiều báo giả.
@@ -110,7 +117,7 @@ Web server trên cổng 80 **vẫn chạy** trong chế độ nút nhấn để 
 ## 7. File trong thư mục
 
 - `CameraWebServer_copy_*.ino` — cấu hình WiFi/PUSH/BUTTON, `camWake()`/`camSleep()`,
-  vòng lặp poll nút nhấn + POST 1 ảnh (nháy LED phản hồi).
+  vòng lặp poll nút nhấn + quét POST liên tục tối đa 15 s (nháy LED phản hồi).
 - `app_httpd.cpp` — web `:80` + stream `:81/stream` + `/capture` + `/status`
   (có `push`, `push_ok`, `push_err`, `cam_on`, `button`) + `/live?state=0|1`,
   tự `camWake()` khi mở `/capture`, `/stream`, `/bmp`.
