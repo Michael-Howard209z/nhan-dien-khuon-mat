@@ -93,6 +93,7 @@ const char *password = "0559649707";
 #define BUTTON_SCAN_SECONDS 15   // nhan nut -> quet lien tuc TOI DA 15 giay (trung mat la dung som)
 #define BUTTON_POST_GAP_MS 300   // nghi giua 2 khung POST lien tiep (~2-3 khung/giay)
 #define BUTTON_MAX_FAILS 3       // POST loi LIEN TIEP qua muc nay -> bao 5 nhap, dung quet
+#define CAM_IDLE_SLEEP_MS 60000  // che do nut: dev xem :81 xong dong lai qua muc nay -> tu tat cam
 
 // BUTTON_ENABLE = 1 -> che do nhan POST 1 anh moi lan nhan nut, khong can
 // PUSH lien tuc nua. Neu nguoi dung de PUSH_ENABLE = 1 thi cung tu tat.
@@ -716,6 +717,7 @@ static bool buttonPressedEvent() {
 // loop() se thu lai moi lan cho den khi g_stream_active = false)
 static uint32_t g_sleep_at = 0;
 static bool g_sleep_req = false;
+static uint32_t stream_off_at = 0;   // luc stream :81 vua dong (0 = khong theo doi)
 static void cam_sleep_request() {
   g_sleep_at = millis() + CAM_OFF_DELAY_MS;
   g_sleep_req = true;
@@ -745,6 +747,10 @@ static void doButtonCapture() {
     btnBlink(5, 60, 60);
     return;
   }
+  // Xoa lich tat cam cu + moc stream cu: tranh truong hop nhan 2 lan lien nhau
+  // (lich tat cua lan truoc chua kip chay) tat cam GIUA phien quet moi.
+  g_sleep_req = false;
+  stream_off_at = 0;
   if (!push_ensure_buf()) {
     btnBlink(5, 60, 60);
     cam_sleep_request();
@@ -962,12 +968,24 @@ void loop() {
     Serial.printf("[BTN] GPIO13 -> %s\n", raw_now ? "LOW (dang nhan)" : "HIGH (nha nut)");
   }
 
-  buttonPoll();   // nhan nut -> chup 1 anh + POST (block luc do la giao dich 1 lan)
+  buttonPoll();   // nhan nut -> quet lien tuc toi da 15 giay (block trong phien quet)
 
   // Tat cam sau CAM_OFF_DELAY_MS; neu stream dang chay thi giu yeu cau va thu lai
   if (g_sleep_req && (int32_t)(millis() - g_sleep_at) >= 0 && !g_stream_active) {
     g_sleep_req = false;
     camSleep();
+  }
+
+  // Tu tat cam khi idle: dev mo :81 xem xong roi dong lai ma quen tat cam ->
+  // cam khong duoc phep sang mai (che do nut: cam chi bat khi quet hoac dev xem).
+  static bool last_stream = false;
+  bool s = g_stream_active;
+  if (last_stream && !s) stream_off_at = millis();   // stream vua dong -> bat dau dem
+  last_stream = s;
+  if (!s && !g_sleep_req && stream_off_at != 0 &&
+      (int32_t)(millis() - stream_off_at) >= (int32_t)CAM_IDLE_SLEEP_MS) {
+    stream_off_at = 0;
+    camSleep();   // tu return neu cam dang OFF
   }
   delay(5);   // nhe CPU, van du do cho debounce 30ms
 #else
