@@ -211,6 +211,12 @@ def main():
     r = admin.post(f"{PORTAL}/api/students", json={
         "full_name": "", "date_of_birth": "x", "class_name": "10A1", "images": [b64(FACE_A)]})
     check("Từ chối thiếu họ tên", r.status_code == 400, str(r.status_code))
+    r = admin.post(f"{PORTAL}/api/students", json={
+        "full_name": "Mat Nho", "date_of_birth": "2008-01-01",
+        "class_name": "10A1", "images": [b64(FACE_A)]})
+    check("Ảnh gốc mặt nhỏ bị từ chối 422 KÈM số đo chẩn đoán",
+          r.status_code == 422 and "px" in r.text and "gần" in r.text,
+          f"{r.status_code} {r.text[:160]}")
     check("chưa đăng nhập thì không đăng ký được",
           requests.post(f"{PORTAL}/api/students", json=payload,
                         allow_redirects=False).status_code in (302, 401))

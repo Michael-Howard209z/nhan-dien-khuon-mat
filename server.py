@@ -736,6 +736,24 @@ def api_list_students():
     return jsonify({"ok": True, "students": db.list_students(class_name=cls or None)})
 
 
+def _sample_hint(diag: dict) -> str:
+    """Lý do ảnh không làm mẫu được, kèm số đo cụ thể để người dùng tự sửa
+    (chụp gần hơn / giữ máy chắc / đủ sáng) thay vì đoán mò."""
+    n = int(diag.get("n") or 0)
+    if n <= 0:
+        return ("không thấy khuôn mặt nào — hãy chụp chính diện, đủ sáng, "
+                "mặt ở giữa khung")
+    size, need = int(diag.get("max_size") or 0), int(diag.get("need_size") or 0)
+    if size < need:
+        return (f"thấy mặt nhưng quá nhỏ (lớn nhất {size}px, cần ≥ {need}px) — "
+                "đưa máy lại gần hơn để mặt chiếm phần lớn khung")
+    blur, need_blur = float(diag.get("blur") or 0), float(diag.get("need_blur") or 0)
+    if blur < need_blur:
+        return (f"mặt bị mờ (độ nét {blur}, cần ≥ {need_blur}) — giữ máy chắc tay, "
+                "đủ sáng, bảo người chụp đứng yên")
+    return "mặt chưa đủ rõ để lấy mẫu — thử ảnh khác gần hơn và sáng hơn"
+
+
 @portal.post("/api/students")
 @auth.require_teacher
 def api_create_student():
@@ -766,9 +784,9 @@ def api_create_student():
                 "hãy thêm ảnh ở góc nghiêng hoặc khoảng cách khác",
                 422,
             )
+        hint = _sample_hint(engine.diagnose_sample(images[0])) if images else ""
         return err(
-            f"Không tìm thấy khuôn mặt đủ rõ trong {len(images)} ảnh đã gửi — "
-            "hãy đưa mặt vào giữa khung, gần ánh sáng rồi thử lại",
+            f"Không dùng được {len(images)} ảnh đã gửi ({hint})",
             422,
         )
     reset_identity_state()
@@ -855,9 +873,9 @@ def api_add_samples(sid):
                     "student": db.get_student(sid),
                 }
             )
+        hint = _sample_hint(engine.diagnose_sample(images[0])) if images else ""
         return err(
-            f"Không tìm thấy khuôn mặt đủ rõ trong {len(images)} ảnh — "
-            "đưa mặt vào giữa khung và chụp gần hơn",
+            f"Không dùng được {len(images)} ảnh đã gửi ({hint})",
             422,
         )
     reset_identity_state()

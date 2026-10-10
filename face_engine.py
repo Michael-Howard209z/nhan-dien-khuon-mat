@@ -303,6 +303,36 @@ class FaceDetector:
             print(f"[detect] {exc}")
             return []
 
+    def detect_raw(self, bgr: np.ndarray, score: float = 0.3):
+        """Hộp mặt THÔ ở ngưỡng `score`, không lọc kích thước.
+
+        Chỉ dùng để CHẨN ĐOÁN vì sao ảnh không làm mẫu được (mặt quá nhỏ/mờ
+        vẫn hiện ở ngưỡng thấp). Mọi detect() thường đều tự đặt lại ngưỡng
+        nên không ảnh hưởng luồng chính.
+        """
+        if bgr is None or bgr.size == 0:
+            return []
+        h, w = bgr.shape[:2]
+        try:
+            with self._lock:  # detector KHÔNG thread-safe
+                if self._det is None:
+                    return []
+                self._det.setInputSize((w, h))
+                self._det.setScoreThreshold(float(score))
+                try:
+                    _, faces = self._det.detect(np.ascontiguousarray(bgr))
+                finally:
+                    self._det.setScoreThreshold(float(self.score_thresh))
+                out = []
+                if faces is not None:
+                    for f in faces:
+                        x, y, bw, bh = (int(round(float(v))) for v in f[:4])
+                        if min(bw, bh) > 0:
+                            out.append((x, y, bw, bh))
+                return out
+        except cv2.error:
+            return []
+
     def _from_yunet(self, faces, w, h):
         out = []
         if faces is None:
@@ -1141,6 +1171,36 @@ class FaceEngine:
         if saved:
             self.retrain()
         return {"faces": faces, "saved": saved, "skipped": skipped}
+
+    def diagnose_sample(self, frame) -> dict:
+        """Vì sao ảnh này không dùng làm mẫu được — CHỈ gọi khi đăng ký thất bại.
+
+        Trả {"w","h","n","max_size","blur","need_size","need_blur"}:
+          n         = số mặt thấy ở ngưỡng nới lỏng (0.3)
+          max_size  = cạnh mặt lớn nhất (px, theo ảnh gốc)
+          blur      = độ nét mặt lớn nhất (Laplacian, cần >= need_blur)
+          need_size = cạnh tối thiểu để nhận làm mẫu (sample_min)
+        """
+        info = {"w": 0, "h": 0, "n": 0, "max_size": 0, "blur": 0.0,
+                "need_size": int(self.cfg["sample_min"]),
+                "need_blur": float(self.cfg["blur_min"])}
+        if frame is None or getattr(frame, "size", 0) == 0:
+            return info
+        h, w = frame.shape[:2]
+        info["w"], info["h"] = int(w), int(h)
+        boxes = self.detector.detect_raw(np.ascontiguousarray(frame), 0.3)
+        info["n"] = len(boxes)
+        if not boxes:
+            return info
+        boxes.sort(key=lambda b: -min(b[2], b[3]))
+        x, y, bw, bh = boxes[0]
+        info["max_size"] = int(min(bw, bh))
+        try:
+            gray = cv2.cvtColor(np.ascontiguousarray(frame), cv2.COLOR_BGR2GRAY)
+            info["blur"] = round(float(self._blur_of(gray, (x, y, bw, bh))), 1)
+        except Exception:
+            pass
+        return info
 
     def retrain(self):
         self.matcher.retrain()
