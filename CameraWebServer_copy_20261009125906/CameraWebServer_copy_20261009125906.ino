@@ -38,7 +38,9 @@
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
+#include <DNSServer.h>          // captive portal: phan moi ten ve IP cua minh khi o AP
 #include <esp_heap_caps.h>
+#include "app_config.h"         // cau hinh persistent (NVS): WiFi, IP tinh, server, huong cam
 
 // ===========================
 // Select camera model in board_config.h
@@ -46,10 +48,21 @@
 #include "board_config.h"
 
 // ===========================
-// WiFi cua truong/nha — ESP32 va MAY CHAY server.py phai CUNG mang WiFi
+// WiFi MAC DINH (chi dung khi LAN DAU chua co gi trong NVS).
+// Sau nay sua tren trang web /setup (khong can code lai).
 // ===========================
 const char *ssid = "Free_Wifi";
 const char *password = "0559649707";
+
+// ============================================================================
+//  CHE DO AP CAU HINH
+//  Neu khong ket noi duoc WiFi (hoac giu nut luc boot) thi ESP32 tu tao mang
+//  WiFi rieng (mac dinh: ESP32-CAM-Setup / 12345678) + captive portal ->
+//  ket noi vao do, dien thoai tu mo trang http://192.168.4.1/ de cau hinh
+//  mang WiFi, IP tinh, URL server, huong camera...
+//  (ham startSetupMode() + bootHeldForSetup() xem truoc void setup())
+// ============================================================================
+static DNSServer dnsServer;
 
 // ==================================================================
 //  DAY KHUNG HINH LEN MAY CHU  -->  sua o day
@@ -58,7 +71,9 @@ const char *password = "0559649707";
                                                   // PULL chay on (server keo :81/stream). Muoi PUSH lai thi doi 1
                                                   // khi cam + server cung mang khong cach ly (vd hotspot dien thoai).
                                                   // LUU Y: BUTTON_ENABLE = 1 se TU TAT che do nay (xem duoi).
-#define PUSH_URL         "http://192.168.1.9:5001/api/esp32/frame"  // endpoint server Python
+#define PUSH_URL         "http://192.168.1.9:5001/api/esp32/frame"  // endpoint server Python - MAC DINH
+                                                  // khi NVS chua co gi. Thuc te sua tren trang web
+                                                  // /setup (luu trong NVS), khong can code lai.
                                                   // <ip-may>: IP may chay "python server.py"
                                                   // :5001 = CAMERA_PORT trong .env
 #define PUSH_MODE_MJPEG  0                        // 0 = POST anh tung khung (KHUYEN DUNG cho Flask)
@@ -133,7 +148,7 @@ static int btn_parse_result(const char *json, int *already, char *out_name, size
 volatile int g_push_state = 0;      // 0 = chua ket noi/dang lai, 1 = dang day
 volatile uint32_t g_push_ok = 0;    // so khung gui thanh cong
 volatile uint32_t g_push_err = 0;   // so khung loi
-const char *g_push_url = PUSH_URL;
+const char *g_push_url = PUSH_URL;   // se tro sang cfg.push_url sau cfg_load() trong setup()
 
 // ---------------- Trang thai camera (doc tu app_httpd.cpp) ----------------
 volatile bool g_cam_on = false;         // true = camera da init (che do nguoc: OFF khi nghi)
@@ -149,9 +164,10 @@ static WiFiClient *push_wc = NULL;
 static WiFiClientSecure *push_wcs = NULL;
 static uint8_t *push_buf = NULL;
 
-// Tach URL -> host / port / path
+// Tach URL -> host / port / path (URL do nguoi dung cai tren trang /setup,
+// luu trong NVS; PUSH_URL trong .ino chi la mac dinh lan dau)
 static void push_parse_url() {
-  String u = PUSH_URL;
+  String u = cfg.push_url[0] ? String(cfg.push_url) : String(PUSH_URL);
   push_https = u.startsWith("https://");
   int p = u.indexOf("://");
   p = (p < 0) ? 0 : p + 3;
@@ -406,7 +422,7 @@ static void push_task(void *arg) {
     vTaskDelete(NULL);
     return;
   }
-  Serial.printf("[PUSH] %s -> %s\n", PUSH_MODE_MJPEG ? "MJPEG stream" : "frame POST", PUSH_URL);
+  Serial.printf("[PUSH] %s -> %s\n", PUSH_MODE_MJPEG ? "MJPEG stream" : "frame POST", cfg.push_url);
 
   Client *c = NULL;
   uint32_t next_frame = 0;
@@ -633,6 +649,11 @@ static bool camWakeInit() {
 #if defined(CAMERA_MODEL_ESP32S3_EYE)
   s->set_vflip(s, 1);
 #endif
+
+  // Huong camera do NGUOI DUNG chon tren trang /setup (luu trong NVS).
+  // -1 = khong ep, giu mac dinh cua cam bien/boarding ben tren.
+  if (cfg.vflip >= 0) s->set_vflip(s, cfg.vflip);
+  if (cfg.hmirror >= 0) s->set_hmirror(s, cfg.hmirror);
 
   return true;
 }
@@ -870,11 +891,69 @@ static void buttonPoll() {
 
 #endif  // BUTTON_ENABLE
 
+// ============================================================================
+//  CHE DO AP CAU HINH (xem ghi chu o dau file)
+// ============================================================================
+// Giu nut nhan ~1.5s luc boot = vao che do AP cau hinh (dung khi muon doi
+// cau hinh ma khong reset duoc WiFi da luu). Tra ve true = dang giu nut.
+static bool bootHeldForSetup() {
+#if BUTTON_ENABLE
+  Serial.println("[CFG] Nhan GIU nut ~1.5s luc boot de vao che do AP cau hinh...");
+  uint32_t t0 = millis();
+  while (millis() - t0 < 1500) {
+    if (digitalRead(BUTTON_PIN) == LOW) return true;   // dang nhan -> che do cau hinh
+    delay(10);
+  }
+#endif
+  return false;
+}
+
+// Tao mang WiFi rieng + captive portal cho trang cau hinh /setup
+static void startSetupMode() {
+  cfg_setup_mode = true;
+
+  // WIFI_AP_STA (khong chi AP) de /api/scan van quet duoc WiFi khi cau hinh.
+  // (Luu y: luc quet, AP se nhay kenh 1-2s -> client co the mat ket noi ngan)
+  WiFi.mode(WIFI_AP_STA);
+  WiFi.setAutoReconnect(false);   // khong cho STA tu thu lai lam gian AP
+  WiFi.setSleep(false);           // tat sleep -> AP on dinh, phan hoi cau hinh nhanh
+  IPAddress ap_ip(192, 168, 4, 1);
+  WiFi.softAPConfig(ap_ip, ap_ip, IPAddress(255, 255, 255, 0));
+  bool ap_ok;
+  if (strlen(cfg.ap_pass) >= 8) {
+    ap_ok = WiFi.softAP(cfg.ap_ssid, cfg.ap_pass);  // WPA2 (mat khau >= 8 ky tu)
+  } else {
+    ap_ok = WiFi.softAP(cfg.ap_ssid);               // mat khau qua ngan -> AP mo
+    Serial.println("[CFG] ap_pass < 8 ky tu -> AP mo (khong co mat khau)");
+  }
+  if (!ap_ok) {
+    // SSID rong hoac ky tu la -> AP that bai; dung lai ten mac dinh cho chac
+    Serial.println("[CFG] softAP THAT BAI -> thu lai ten mac dinh 'ESP32-CAM-Setup'");
+    WiFi.softAP("ESP32-CAM-Setup");
+  }
+
+  // Captive portal: moi ten tenh deu tro ve 192.168.4.1 -> dien thoai tu hien
+  // trang cau hinh (Android/iOS/Windows deu kiem tra cac endpoint /generate_204...)
+  dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
+  dnsServer.start(53, "*", ap_ip);
+
+  Serial.println("[CFG] *** VAO CHE DO AP CAU HINH ***");
+  Serial.printf("[CFG] Ket noi vao mang WiFi '%s' (mat khau: %s)\n",
+                cfg.ap_ssid, strlen(cfg.ap_pass) >= 8 ? cfg.ap_pass : "(khong)");
+  Serial.printf("[CFG] Mo trinh duyet tai http://%s/ de cau hinh\n",
+                ap_ip.toString().c_str());
+}
+
 void setup() {
   Serial.begin(115200);
   // Tat debug log tren UART -> giam nhieu, stream muot hon nhieu
   Serial.setDebugOutput(false);
   Serial.println();
+
+  // Doc cau hinh da luu trong NVS (lan dau: mac dinh ssid/password/PUSH_URL
+  // o tren file .ino). Sau nay sua tren trang web /setup, khong can code lai.
+  cfg_load(ssid, password, PUSH_URL);
+  g_push_url = cfg.push_url;   // trang /status tren web hien URL dang dung
 
 #if BUTTON_ENABLE
   pinMode(BUTTON_PIN, INPUT_PULLUP);   // nut nhan: GPIO13 -> GND, nhan xuong = muc THAP
@@ -903,27 +982,36 @@ void setup() {
   digitalWrite(33, LOW);
 #endif
 
-  WiFi.mode(WIFI_STA);                        // tat AP cho do ton RAM/CPU
-  WiFi.setAutoReconnect(true);
-  WiFi.begin(ssid, password);
-  WiFi.setSleep(false);                     // tat sleep -> HTTP nhanh, it lag
-  WiFi.setTxPower(WIFI_POWER_19_5dBm);      // phat cong suat toi da -> song WiFi khoe hon
-
-  Serial.print("WiFi connecting");
-  uint32_t wifi_t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && (millis() - wifi_t0) < 20000) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("");
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("WiFi connected");
+  // ---- MANG: ket noi WiFi da luu, that bai -> tu tao mang AP cau hinh ----
+  if (cfg.wifi_ssid[0] == '\0' || bootHeldForSetup()) {
+    // Chua co WiFi nao duoc luu hoac giu nut luc boot (muon sua cau hinh)
+    // -> vao AP NGAY, khong ton 20s cho ket noi that bai.
+    if (cfg.wifi_ssid[0] == '\0') Serial.println("[CFG] Chua co WiFi nao duoc luu -> vao che do AP cau hinh");
+    startSetupMode();
   } else {
-    // KHONG de setup treo vo han: treo = web khong mo, nut nhan khong chay,
-    // LED khong am bao -> rat kho doan. Chay tiep: nut van hoat dong, POST
-    // loi se bao 5 nhanh; WiFi tu ket noi lai khi nao duoc (setAutoReconnect).
-    Serial.println("\n[BTN] WiFi CHUA ket noi sau 20s -> van chay tiep (nut + web).");
-    Serial.println("[BTN] Kiem tra ssid/password trong .ino; bam nut luc nay se nhap 5 lan (loi mang).");
+    WiFi.persistent(false);                // cau hinh WiFi do app_config quan ly (NVS), khong can SDK luu nua
+    WiFi.mode(WIFI_STA);                   // tat AP cho do ton RAM/CPU
+    WiFi.setAutoReconnect(true);
+    WiFi.setSleep(false);                  // tat sleep -> HTTP nhanh, it lag
+    WiFi.setTxPower(WIFI_POWER_19_5dBm);   // phat cong suat toi da -> song WiFi khoe hon
+    if (cfg.use_static_ip) cfg_apply_static_ip();   // IP tinh PHAI cai TRUOC WiFi.begin()
+    WiFi.begin(cfg.wifi_ssid, cfg.wifi_pass);
+
+    Serial.printf("WiFi connecting to '%s'", cfg.wifi_ssid);
+    uint32_t wifi_t0 = millis();
+    while (WiFi.status() != WL_CONNECTED && (millis() - wifi_t0) < 20000) {
+      delay(500);
+      Serial.print(".");
+    }
+    Serial.println("");
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.printf("WiFi connected, IP: %s\n", WiFi.localIP().toString().c_str());
+    } else {
+      // Khong ket noi duoc -> TU TAO mang WiFi rieng de sua cau hinh (sai mat
+      // khau, doi mang, doi IP static...) thay vi chi in canh bao nhu truoc day.
+      Serial.println("\n[CFG] WiFi KHONG ket noi duoc sau 20s -> tao mang AP cau hinh");
+      startSetupMode();
+    }
   }
 
   // Bao hieu "firmware da chay": LED sang co dinh ~1.5s khi boot xong.
@@ -951,14 +1039,23 @@ void setup() {
                 33,
 #endif
                 BUTTON_SCAN_SECONDS,
-                PUSH_URL);
+                cfg.push_url);
 #endif
-  Serial.print("Camera Ready! Use 'http://");
-  Serial.print(WiFi.localIP());
-  Serial.println("' to connect");
+  if (cfg_setup_mode) {
+    Serial.print("CHE DO CAU HINH! Ket noi WiFi '");
+    Serial.print(cfg.ap_ssid);
+    Serial.println("' roi mo http://192.168.4.1/ de cau hinh");
+  } else {
+    Serial.print("Camera Ready! Use 'http://");
+    Serial.print(WiFi.localIP());
+    Serial.println("' to connect (trang cau hinh: /setup)");
+  }
 }
 
 void loop() {
+  if (cfg_setup_mode) {
+    dnsServer.processNextRequest();   // captive portal: phan moi ten ve minh
+  }
 #if BUTTON_ENABLE
   // Chan doan: in ra moi khi trang thai chan nut DOI (nhan/nha) -> kiem tra wiring
   static bool last_raw = false;

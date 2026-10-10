@@ -18,7 +18,39 @@ sớm) → LED báo kết quả → tắt camera.
 - Khi `BUTTON_ENABLE = 1`, `PUSH_ENABLE` **bị tự động tắt** (không có task push liên tục,
   không stream nội bộ tự chạy) — đúng yêu cầu để chip không bị "đói" tài nguyên.
 
-## 2. Chế độ nút nhấn (BUTTON) — đấu nối & hoạt động
+## 2. Cấu hình WiFi không cần code — chế độ AP tự tạo (trang `/setup`)
+
+Khi ESP32 **không kết nối được WiFi** (sai mật khẩu, đổi mạng, server đổi IP...) nó
+**tự phát một mạng WiFi riêng** thay vì chỉ in cảnh báo như trước:
+
+1. Kết nối điện thoại/máy tính vào mạng **`ESP32-CAM-Setup`** (mật khẩu mặc định `12345678`).
+2. Điện thoại sẽ **tự mở trang cấu hình** (captive portal); nếu không, mở
+   `http://192.168.4.1/` hoặc `http://192.168.4.1/setup`.
+3. Trang `/setup` cho phép cài đặt và **lưu vào NVS** (giữ nguyên sau khi mất điện):
+   - **Mạng WiFi**: quét mạng, chọn SSID + mật khẩu.
+   - **IP tĩnh** (tùy chọn): IP / Gateway / Subnet / DNS (bỏ chọn = DHCP).
+   - **Server nhận diện**: URL endpoint (`http://<ip-may>:5001/api/esp32/frame` —
+     IP **hoặc tên miền** đều được). Áp dụng ngay, không cần reboot.
+   - **Hướng camera**: lật dọc (vflip) / lật ngang (hmirror) — áp dụng ngay, có
+     xem ảnh trực tiếp (`:81/stream`) để chỉnh.
+   - **Tên/mật khẩu mạng AP** tự tạo (mặc định `ESP32-CAM-Setup` / `12345678`).
+   - **Khôi phục mặc định** (xoá cấu hình đã lưu).
+4. Bấm **Lưu cấu hình**: nếu đổi mạng/IP/AP thì thiết bị tự khởi động lại (~2 s);
+   nếu chỉ đổi hướng camera/URL server thì áp dụng ngay, không reboot.
+
+Một số lưu ý:
+
+- **Vào lại chế độ cấu hình**: *giữ nút nhấn ~1,5 giây ngay lúc boot* (trước khi
+  nháy LED báo boot) → vào AP kể cả khi WiFi đang kết nối bình thường.
+- `ssid` / `password` / `PUSH_URL` trong `.ino` giờ chỉ là **giá trị mặc định lần
+  đầu** (chưa có gì trong NVS) — không cần sửa code nữa.
+- **Trang `/setup` cũng mở được khi đã kết nối WiFi** tại `http://<ip-esp32>/setup`.
+- API: `GET /api/cfg` (JSON cấu hình), `POST /api/cfg` (lưu, body `key=value&...`,
+  `reset=1` = khôi phục mặc định), `GET /api/scan` (quét WiFi).
+- Khi ở chế độ AP, điểm danh **chưa hoạt động** (chưa có mạng tới server) — vào
+  `/setup`, bật "Xem ảnh trực tiếp" chỉnh hướng camera trước rồi cài mạng WiFi.
+
+## 3. Chế độ nút nhấn (BUTTON) — đấu nối & hoạt động
 
 ### Đấu nối
 
@@ -58,9 +90,9 @@ sớm) → LED báo kết quả → tắt camera.
 | **3 nháy ngắn ~120 ms** | Hết 15 giây quét mà không thấy mặt / không khớp ai (`matched:0` mọi khung) |
 | **5 nháy nhanh ~60 ms** | Lỗi mạng / lỗi server (connect fail, HTTP != 2xx, **hoặc WiFi chưa kết nối**) |
 
-> **WiFi chưa lên thì sau 20 s firmware vẫn chạy tiếp** (không treo trong setup):
-> web `:80` mở, nút nhấn vẫn hoạt động — bấm nút lúc này sẽ nháy **5 lần** (loi mang).
-> Kiểm tra `ssid`/`password` trong `.ino` và xem log Serial để biết WiFi có lên không.
+> **WiFi chưa lên sau 20 s → firmware tự chuyển sang chế độ AP cấu hình** (mục 2):
+> kết nối vào mạng `ESP32-CAM-Setup` rồi mở `http://192.168.4.1/` để sửa WiFi/server.
+> Bấm nút trong lúc này vẫn báo **5 lần nháy** (loi mang) vì chưa gửi lên được server.
 
 Phản hồi server (HTTP 200, JSON top-level ASCII):
 
@@ -70,7 +102,7 @@ Phản hồi server (HTTP 200, JSON top-level ASCII):
 {"ok":true,"matched":0,"already":false,"full_name":"", "count":0, ...}    // -> 3 nháy
 ```
 
-## 3. Web điều khiển (`:80`) — dành cho developer
+## 4. Web điều khiển (`:80`) — dành cho developer
 
 Web server trên cổng 80 **vẫn chạy** trong chế độ nút nhấn để cấu hình camera:
 
@@ -86,7 +118,7 @@ Web server trên cổng 80 **vẫn chạy** trong chế độ nút nhấn để 
 - **`GET /live?state=1`** → bật cam; **`GET /live?state=0`** → tắt cam.
   Trả `{"ok":1,"cam":0|1}` — dùng cho panel debug của server Python.
 
-## 4. Cấu hình khuyến dùng cho nhận diện
+## 5. Cấu hình khuyến dùng cho nhận diện
 
 - Độ phân giải: **VGA 640×480** (nhận xa hơn). Mặc định firmware là QVGA 320×240
   (siêu mượt) — chế độ nút nhấn quét ~2–3 khung/giây trong tối đa 15 s nên dư sức chạy VGA.
@@ -96,7 +128,7 @@ Web server trên cổng 80 **vẫn chạy** trong chế độ nút nhấn để 
 - `PUSH_MODE_MJPEG = 0` cho server Flask (mỗi khung 1 POST field `file`).
   `= 1` (luồng MJPEG chunked) chỉ dùng khi server hiểu MJPEG push — Flask dễ treo.
 
-## 5. Quay lại hành vi cũ / tắt các tính năng mới
+## 6. Quay lại hành vi cũ / tắt các tính năng mới
 
 - `BUTTON_ENABLE = 0` → hết chế độ nút nhấn; `loop()` trở về `delay(10000)` như cũ,
   cam được init ngay khi boot, `/live` vẫn hoạt động.
@@ -106,20 +138,29 @@ Web server trên cổng 80 **vẫn chạy** trong chế độ nút nhấn để 
 - `CAM_OFF_DELAY_MS` — thời gian giữ cam sau khi gửi xong (mặc định 1500 ms).
 - `BUTTON_PIN` — GPIO của nút (mặc định 13, kéo nội lên, kích mức thấp).
 
-## 6. Nạp firmware
+## 7. Nạp firmware
 
 1. Arduino IDE / arduino-cli: board `AI Thinker ESP32-CAM` (PSRAM Enabled), partition `custom` (có `partitions.csv`).
-2. Sửa `ssid` / `password`, `PUSH_URL` trong `.ino`.
-3. Nạp, mở Serial 115200 lấy IP, mở `http://<ip-esp32>/` để chỉnh flash / độ phân giải / xoay.
+2. Nạp (không bắt buộc phải sửa `ssid`/`password`/`PUSH_URL` nữa — đó chỉ là giá trị
+   mặc định; cài đặt thực tế làm trên trang `/setup`, xem mục 2).
+3. Mở Serial 115200 lấy IP → mở `http://<ip-esp32>/` chỉnh flash / độ phân giải,
+   `http://<ip-esp32>/setup` cấu hình mạng + server + hướng camera.
 4. Kiểm tra: bấm nút → log Serial `[BTN] Diem danh OK: ...` + LED nháy 1 lần dài;
    server nhận `POST /api/esp32/frame?capture=1`.
+5. *Quên WiFi / muốn cài lại*: giữ nút ~1,5 s lúc boot → vào mạng `ESP32-CAM-Setup`
+   rồi mở `http://192.168.4.1/` (xem mục 2).
 
-## 7. File trong thư mục
+## 8. File trong thư mục
 
-- `CameraWebServer_copy_*.ino` — cấu hình WiFi/PUSH/BUTTON, `camWake()`/`camSleep()`,
+- `CameraWebServer_copy_*.ino` — cấu hình WiFi/PUSH/BUTTON, chế độ AP tự tạo
+  (`startSetupMode()` + captive portal), `camWake()`/`camSleep()`,
   vòng lặp poll nút nhấn + quét POST liên tục tối đa 15 s (nháy LED phản hồi).
+- `app_config.h` / `app_config.cpp` — lưu cấu hình persistent trong NVS
+  (WiFi, IP tĩnh, URL server, hướng camera, AP), `cfg_load()`/`cfg_save()`/`cfg_reset()`.
+- `setup_page.h` — trang HTML `/setup` (cấu hình WiFi + server + hướng camera).
 - `app_httpd.cpp` — web `:80` + stream `:81/stream` + `/capture` + `/status`
   (có `push`, `push_ok`, `push_err`, `cam_on`, `button`) + `/live?state=0|1`,
-  tự `camWake()` khi mở `/capture`, `/stream`, `/bmp`.
+  tự `camWake()` khi mở `/capture`, `/stream`, `/bmp`,
+  thêm `/setup` + `/api/cfg` + `/api/scan` (captive portal redirect).
 - `board_config.h` / `camera_pins.h` — chọn `CAMERA_MODEL_AI_THINKER`.
 - `partitions.csv`, `ci.json` — cấu hình build.
