@@ -131,6 +131,16 @@ try:
     bad = [t for t in tabs if html(admin, f"/quan-ly?tab={t}").status_code != 200]
     check("admin mở được đủ 8 tab", not bad, bad)
 
+    # Hồi quy bug Jinja scope: set() trong block content nhưng dùng ở block
+    # scripts -> render "var STUD = ;" làm chết toàn bộ nút bấm mọi tab.
+    # Mọi tab phải render các biến JS thành mảng JSON hợp lệ.
+    pages = {t: html(admin, f"/quan-ly?tab={t}").text for t in tabs}
+    js_bad = [t for t, txt in pages.items()
+              if "var STUD = ;" in txt or "var CLS = ;" in txt or "= ;" in txt]
+    check("JS mọi tab render mảng hợp lệ (không có 'var X = ;')", not js_bad, js_bad)
+    check("biến JS STUD/CLS tồn tại ở tab Lớp",
+          "var STUD = [" in pages["lop"] and "var CLSS = [" in pages["lop"])
+
     r = html(admin, "/quan-ly?tab=tong-quan")
     check("tổng quan có ô số liệu",
           "Tổng học sinh" in r.text and "Có mặt hôm nay" in r.text)
@@ -253,10 +263,14 @@ try:
     check("không thấy tab admin", all(t not in r.text for t in
           ("Tổng quan", "Thêm lớp mới", "Tài khoản giáo viên", "Cổng dịch vụ")))
 
+    gv_pages = {}
     for t in ("hom-nay", "bao-cao"):
         r = html(gv, f"/quan-ly?tab={t}")
+        gv_pages[t] = r.text
         check(f"giáo viên mở được tab {t}",
               r.status_code == 200 and "Chú giải" in r.text, r.status_code)
+    check("JS tab giáo viên không bị lỗi biến rỗng",
+          not any("= ;" in txt for txt in gv_pages.values()))
 
     r = html(gv, "/quan-ly?tab=lop")
     check("giáo viên ép tab Lớp của admin -> về tab đầu",

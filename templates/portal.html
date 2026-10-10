@@ -3,14 +3,17 @@
 {% block bodyclass %}r-{{ role }}{% endblock %}
 {% block nav_portal %}on{% endblock %}
 
-{% block content %}
-
+{# Dat o top-level (ngoai moi block): Jinja co lap scope theo block, set trong
+   block content se KHONG thay duoc trong block scripts -> render rong
+   "var STUD = ;" -> chet ca khoi JS, moi nut bam deu liet. #}
 {% set list_students = students if tab == 'dang-ky' else [] %}
 {% set js_studs = list_students | map(attribute='id') | list | tojson %}
 {% set js_names = list_students | map(attribute='full_name') | list | tojson %}
 {% set cls_names = (classes | list | tojson) if tab == 'dang-ky' else '[]' %}
 {% set cls_dict = (classes | map(attribute='name') | list | tojson) if tab == 'lop' else '[]' %}
 {% set cls_all = (classes | map(attribute='name') | list | tojson) if tab == 'giao-vien' else '[]' %}
+
+{% block content %}
 
 <div class="page-head">
   <div>
