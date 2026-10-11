@@ -128,12 +128,12 @@ static int ra_filter_run(ra_filter_t *filter, int value) {
 #endif
 
 #if defined(LED_GPIO_NUM)
-void enable_led(bool en) {  // Turn LED On or Off
+void enable_led(bool en) {  // Turn LED On or Off (on/off, khong mo do - tranh LEDC)
   int duty = en ? led_duty : 0;
   if (en && isStreaming && (led_duty > CONFIG_LED_MAX_INTENSITY)) {
     duty = CONFIG_LED_MAX_INTENSITY;
   }
-  ledcWrite(LED_GPIO_NUM, duty);
+  digitalWrite(LED_GPIO_NUM, duty > 0 ? HIGH : LOW);
   //ledc_set_duty(CONFIG_LED_LEDC_SPEED_MODE, CONFIG_LED_LEDC_CHANNEL, duty);
   //ledc_update_duty(CONFIG_LED_LEDC_SPEED_MODE, CONFIG_LED_LEDC_CHANNEL);
   log_i("Set LED intensity to %d", duty);
@@ -1556,7 +1556,10 @@ void startCameraServer() {
 
 void setupLedFlash() {
 #if defined(LED_GPIO_NUM)
-  ledcAttach(LED_GPIO_NUM, 5000, 8);
+  // Co y KHONG ledcAttach: tu chon timer co the de len timer XCLK cua camera
+  // (sensor init OK nhung khong ra khung). Flash chi can bat/tat -> GPIO thuong.
+  pinMode(LED_GPIO_NUM, OUTPUT);
+  digitalWrite(LED_GPIO_NUM, LOW);
 #else
   log_i("LED flash is disabled -> LED_GPIO_NUM undefined");
 #endif

@@ -692,11 +692,14 @@ void camSleep() {
 // ============================================================================
 #if BUTTON_ENABLE
 
-// LED phep biet: dung flash GPIO4 (LED_GPIO_NUM) neu co, khong co thi den do GPIO33
+// LED phep biet: dung flash GPIO4 (LED_GPIO_NUM) neu co, khong co thi den do GPIO33.
+// Co y dung digitalWrite (bat/tat), KHONG dung LEDC: ledcAttach() tu chon timer
+// co the de len timer XCLK cua camera -> sensor Treo (init OK nhung fb NULL mai).
+// Ta chi can on/off (khong can mo do sang) nen digitalWrite la du va an toan.
 static void btnLed(bool on) {
 #if defined(LED_GPIO_NUM)
   led_duty = on ? 255 : 0;                             // dong bo "led_intensity" tren /status
-  ledcWrite(LED_GPIO_NUM, led_duty);                   // ledcAttach da chay trong setupLedFlash()
+  digitalWrite(LED_GPIO_NUM, on ? HIGH : LOW);
 #else
   digitalWrite(33, on ? HIGH : LOW);       // den do status tren ESP32-CAM
 #endif
@@ -1073,7 +1076,7 @@ void setup() {
 
 // Setup LED FLash if LED pin is defined in camera_pins.h
 #if defined(LED_GPIO_NUM)
-  setupLedFlash();          // ledcAttach(LED_GPIO_NUM, 5000, 8) -> sau do ledcWrite() la du
+  setupLedFlash();          // GPIO output thuong (khong LEDC) + tat san
 #else
   pinMode(33, OUTPUT);      // khong co flash -> dung den do status GPIO33 cho LED phep biet
   digitalWrite(33, LOW);
