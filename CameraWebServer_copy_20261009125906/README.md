@@ -134,8 +134,10 @@ Web server trên cổng 80 **vẫn chạy** trong chế độ nút nhấn để 
 
 ## 5. Cấu hình khuyến dùng cho nhận diện
 
-- Độ phân giải: **VGA 640×480** (nhận xa hơn). Mặc định firmware là QVGA 320×240
-  (siêu mượt) — chế độ nút nhấn quét ~2–3 khung/giây trong tối đa 15 s nên dư sức chạy VGA.
+- Độ phân giải: **VGA 640×480** (mặc định firmware — vừa chứng minh chạy ổn định
+  trên OV5640, vừa nhận xa hơn QVGA). Đừng chuyển xuống QVGA sau init (treo
+  sensor OV5640, fb NULL). Chế độ nút nhấn quét ~2–3 khung/giây trong tối đa
+  15 s nên dư sức chạy VGA.
 - Chất lượng JPEG: `12` (10 = nét, 20+ = nhẹ/nhanh).
 - Server: có thể hạ `MIN_FACE_SIZE` xuống `24–32` nếu mặt vẫn nhỏ, tăng `DETECT_SCORE`
   nếu nhiều báo giả.

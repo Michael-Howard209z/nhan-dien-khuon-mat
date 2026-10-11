@@ -852,10 +852,10 @@ static const char INDEX_HTML[] = R"HTMLDOC(
   <div class="row">
     <span class="lbl">Độ phân giải</span>
     <select id="size">
-      <option value="5" selected>QVGA 320x240 (siêu mượt)</option>
+      <option value="5">QVGA 320x240 (siêu mượt)</option>
       <option value="6">CIF 400x296</option>
       <option value="7">HVGA 480x320</option>
-      <option value="8">VGA 640x480 (nhận xa, lag hơn)</option>
+      <option value="8" selected>VGA 640x480 (mặc định firmware)</option>
       <option value="9">SVGA 800x600 (nét, cần WiFi khỏe)</option>
       <option value="10">XGA 1024x768</option>
       <option value="11">HD 1280x720</option>
@@ -865,8 +865,8 @@ static const char INDEX_HTML[] = R"HTMLDOC(
     <span class="lbl">Chất lượng (nhỏ hơn = nét hơn)</span>
     <select id="quality">
       <option value="10">10 (nét, nặng)</option>
-      <option value="12">12</option>
-      <option value="15" selected>15 (cân bằng mượt)</option>
+      <option value="12" selected>12 (mặc định firmware)</option>
+      <option value="15">15 (cân bằng mượt)</option>
       <option value="20">20 (nhẹ/nhanh)</option>
       <option value="30">30 (siêu nhẹ)</option>
     </select>

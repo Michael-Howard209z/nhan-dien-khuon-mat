@@ -82,7 +82,7 @@ static DNSServer dnsServer;
                                                   // 1 = POST luong MJPEG lien tuc (chunked, giu 1 ket noi)
                                                   //     chi dung khi server hieu MJPEG push (Flask de treo)
 #define PUSH_FPS         10                       // khung/giay gui len (1..15) -- QVGA+q15 ~8KB/khung, 10fps ~640kbps muot
-#define PUSH_JPEG_MAX    (120 * 1024)             // bo dem tam cho 1 khung (QVGA nho -> 120KB du, tiet kiem PSRAM)
+#define PUSH_JPEG_MAX    (120 * 1024)             // bo dem tam cho 1 khung (VGA q12 ~15-30KB -> 120KB du, tiet kiem PSRAM)
 #define PUSH_BOUNDARY    "esp32cam"
 // ==================================================================
 
@@ -583,25 +583,25 @@ static bool camWakeInit() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  // Cap phat buffer VUA DU cho QVGA (khong phai UXGA): tiet kiem ~500KB PSRAM,
-  // giam phan manh heap -> it lag/treo. Muon doi do phan giai tren web van duoc
-  // (sensor set_framesize sau init), chi can buffer >= khung lon nhat muon dung.
-  // QVGA+quality15 ~8KB: de fb_count=2 + GRAB_LATEST -> luon lay khung MOI nhat.
-  config.frame_size = FRAMESIZE_QVGA;
+  // Cau hinh giong ban minimal da chung minh chay on dinh tren OV5640:
+  // VGA + quality 12 + fb_count 1 + GRAB_WHEN_EMPTY.
+  // (QVGA set sau init lam sensor OV5640 treo, fb NULL mai - khong dung nua.)
+  // VGA con tot hon cho diem danh xa 2-3m (mat nhieu pixel hon de nhan dien).
+  config.frame_size = FRAMESIZE_VGA;
   config.pixel_format = PIXFORMAT_JPEG;     // for streaming
   //config.pixel_format = PIXFORMAT_RGB565; // for face detection/recognition
-  config.grab_mode = CAMERA_GRAB_LATEST;    // luon lay khung hinh moi nhat -> it lag
+  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY; // lay khung tuan tu, on dinh
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.jpeg_quality = 15;                 // 12=net/nang, 15=can bang, 20-25=nhe/muot (0..63, so cang lon cang nhe)
-  config.fb_count = 2;                      // double buffering -> frame rate cao hon
+  config.jpeg_quality = 12;                  // 12=net/khoe, 15=can bang, 20-25=nhe/muot (0..63, so cang lon cang nhe)
+  config.fb_count = 1;                       // 1 buffer -> it ton RAM, du cho nhip quet 2-3 khung/giay
 
   // if PSRAM IC present, init with UXGA resolution and higher JPEG quality
   //                      for larger pre-allocated frame buffer.
   if (config.pixel_format == PIXFORMAT_JPEG) {
     if (psramFound()) {
-      config.jpeg_quality = 15;
-      config.fb_count = 2;
-      config.grab_mode = CAMERA_GRAB_LATEST;
+      config.jpeg_quality = 12;
+      config.fb_count = 1;
+      config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
       config.fb_location = CAMERA_FB_IN_PSRAM;
     } else {
       // Limit the frame size when PSRAM is not available
@@ -640,14 +640,9 @@ static bool camWakeInit() {
     s->set_brightness(s, 1);   // up the brightness just a bit
     s->set_saturation(s, -2);  // lower the saturation
   }
-  // drop down frame size for higher initial frame rate
-  if (config.pixel_format == PIXFORMAT_JPEG) {
-    // SIEU MUOT: QVGA 320x240 + quality 15 (~8KB/khung, 10fps ~640kbps).
-    // QVGA nhan gan <1.5m tot; muon nhan xa 2-3m thi mo web http://<ip-esp32>/
-    // chuyen len VGA (nut preset "Can bang") — danh doi lag hon chut.
-    s->set_framesize(s, FRAMESIZE_QVGA);
-    s->set_quality(s, 15);
-  }
+  // KHONG goi set_framesize/set_quality sau init: tren OV5640, doi do phan
+  // giai sau init lam treo luong khung (fb NULL mai). Dung luon cau hinh
+  // luc init (VGA/quality 12, giong ban minimal da chung minh chay).
 
 #if defined(CAMERA_MODEL_M5STACK_WIDE) || defined(CAMERA_MODEL_M5STACK_ESP32CAM)
   s->set_vflip(s, 1);
