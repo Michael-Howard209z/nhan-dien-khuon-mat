@@ -109,10 +109,12 @@ static DNSServer dnsServer;
 #define BUTTON_SCAN_SECONDS 15   // nhan nut -> quet lien tuc TOI DA 15 giay (trung mat la dung som)
 #define BUTTON_POST_GAP_MS 300   // nghi giua 2 khung POST lien tiep (~2-3 khung/giay)
 #define BUTTON_MAX_FAILS 3       // POST loi LIEN TIEP qua muc nay -> bao 5 nhap, dung quet
-#define BUTTON_SCAN_FLASH 1      // 1 = giu flash sang suot luc quet (sang, ro mat).
+#define BUTTON_SCAN_FLASH 0      // 1 = giu flash sang suot luc quet (sang, ro mat).
                                  // 0 = tat flash khi quet: dung khi NGUON YEU (flash+WiFi+camera
                                  //     cung luc gay sut ap -> sensor treo, fb NULL). Can du anh
                                  //     sang moi truong neu tat flash.
+                                 // (Dang de 0 de chan doan: neu quet chay duoc khi tat flash
+                                 //  thi 100% la nguon yeu - flash la giot nuoc tran ly.)
 
 // BUTTON_ENABLE = 1 -> che do nhan POST 1 anh moi lan nhan nut, khong can
 // PUSH lien tuc nua. Neu nguoi dung de PUSH_ENABLE = 1 thi cung tu tat.
