@@ -17,6 +17,7 @@ Ba nâng cấp chính so với bản cũ (Haar + LBPH):
 
 Nhãn vẽ bằng Pillow để hiển thị đúng tiếng Việt (có dấu).
 """
+import shutil
 import threading
 import time
 import urllib.request
@@ -80,8 +81,11 @@ MODELS = {
     ),
     "sface": (
         "face_recognition_sface_2021dec.onnx",
-        "https://raw.githubusercontent.com/opencv/opencv_zoo/main/models/"
-        "face_recognition_sface/face_recognition_sface_2021dec.onnx",
+        # Chu y: file SFace (~38MB) luu dang Git LFS tren opencv_zoo nen host
+        # raw.githubusercontent.com chi tra POINTER 133 byte (khong phai model).
+        # Dung media.githubusercontent.com de lay binary that.
+        "https://media.githubusercontent.com/media/opencv/opencv_zoo/main/"
+        "models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
     ),
 }
 MODEL_DIR = db.DATA_DIR / "models"
@@ -127,6 +131,19 @@ def _new_lbph():
     if factory:
         return factory()
     return cv2.face.LBPHFaceRecognizer.create()
+
+
+def _coerce_threshold(metric: str, value: float) -> float:
+    """Ngưỡng hợp lệ theo metric đang chạy.
+
+    Thang cosin (gia tri <= 1.5, vd 0.42) VO NGHIA voi LBPH (thang 0..150):
+    giu nguyen thi khong bao gio khop ai -> doi sang mac dinh 75.
+    Nguong thang LBPH do nguoi dung tu chinh thi ton trong.
+    """
+    value = float(value)
+    if metric != "cosine" and value <= 1.5:
+        return 75.0
+    return value
 
 
 def _ensure_model(key: str) -> Path:
@@ -388,8 +405,11 @@ class FaceMatcher:
             self.name = "sface"
         except Exception as exc:  # noqa: BLE001
             print(f"[face] Khong dung SFace ({exc}); chuyen sang LBPH")
-            if self.threshold > 1.5:
-                self.threshold = 75.0  # ngưỡng LBPH kiểu cũ, giữ để tương thích
+            new_thr = _coerce_threshold("lbph", self.threshold)
+            if new_thr != self.threshold:
+                print(f"[face] Nguong {self.threshold:g} la thang cosin -> "
+                      "doi sang 75 cho LBPH")
+                self.threshold = new_thr
         if self._sf is None:
             self._lbph = _new_lbph()
 
@@ -421,8 +441,13 @@ class FaceMatcher:
         return self._trained
 
     def retrain(self) -> None:
-        """Đọc lại toàn bộ mẫu trong data/faces/<id>/ và dựng lại bộ so khớp."""
+        """Đọc lại toàn bộ mẫu trong data/faces/<id>/ và dựng lại bộ so khớp.
+
+        Thư mục của học sinh ĐÃ XOÁ (không còn trong DB) bị bỏ qua + xoá luôn:
+        nếu không, người lạ có thể khớp vào mẫu của người đã xoá (điểm danh ma).
+        """
         db.init_db()      # bảng phải tồn tại (để engine dùng được ngoài server.py)
+        known = {int(s["id"]) for s in db.list_students()}
         vectors, grays, counts = {}, {}, {}
         if db.FACE_DIR.exists():
             for folder in sorted(db.FACE_DIR.iterdir()):
@@ -431,6 +456,10 @@ class FaceMatcher:
                 try:
                     sid = int(folder.name)
                 except ValueError:
+                    continue
+                if sid not in known:
+                    print(f"[face] Thu muc mao data/faces/{sid} (khong co hoc sinh"
+                          " nay trong DB) -> bo qua, khong nap vao gallery")
                     continue
                 vlist, glist = [], []
                 for path in sorted(folder.glob("*.jpg")):
@@ -774,8 +803,12 @@ class FaceEngine:
 
     @threshold.setter
     def threshold(self, value):
-        self.matcher.threshold = float(value)
-        self.cfg["match_threshold"] = self.matcher.threshold
+        new = _coerce_threshold(self.matcher.metric, value)
+        if new != float(value):
+            print(f"[face] Nguong {float(value):g} la thang cosin nhung dang chay "
+                  f"{self.matcher.metric} -> doi sang {new:g}")
+        self.matcher.threshold = new
+        self.cfg["match_threshold"] = new
         self.matcher.retrain()      # ngưỡng riêng từng người phụ thuộc ngưỡng toàn cục
 
     @property
@@ -789,7 +822,7 @@ class FaceEngine:
             if key not in DEFAULTS or val is None or val == "":
                 continue
             if key == "match_threshold":
-                new = float(val)
+                new = _coerce_threshold(self.matcher.metric, val)
                 if new == self.matcher.threshold:
                     continue
                 self.matcher.threshold = new
