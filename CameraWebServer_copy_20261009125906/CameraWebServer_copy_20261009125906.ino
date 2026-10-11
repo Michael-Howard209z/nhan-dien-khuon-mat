@@ -144,6 +144,8 @@ static int push_read_response_body(Client *c, char *buf, size_t buf_sz, int time
 static int btn_parse_result(const char *json, int *already, char *out_name, size_t name_sz);
 #endif
 
+static void serialPoll();   // lenh Serial (/url, /help): doi URL server khong can nap lai
+
 // ---------------- Trang thai push (doc tu app_httpd.cpp) ----------------
 volatile int g_push_state = 0;      // 0 = chua ket noi/dang lai, 1 = dang day
 volatile uint32_t g_push_ok = 0;    // so khung gui thanh cong
@@ -944,6 +946,73 @@ static void startSetupMode() {
                 ap_ip.toString().c_str());
 }
 
+// ============================================================================
+//  LENH SERIAL (Serial Monitor, baud 115200, Newline): doi URL server ma
+//  khong can sua code / nap lai. Luu vao NVS (giu sau khi mat dien).
+//    /url                                  -> in URL server dang dung
+//    /url http://<ip-may>:5001/api/esp32/frame
+//                                          -> luu URL moi, lan nhan nut ke
+//                                             tiep dung ngay (khong reboot)
+//    /help                                 -> liet ke lenh
+// ============================================================================
+static void serialHandleCmd(char *line) {
+  while (*line == ' ' || *line == '\t') line++;   // bo khoang trang dau
+  if (*line == '\0') return;
+  if (strncmp(line, "/url", 4) == 0
+      && (line[4] == '\0' || line[4] == ' ' || line[4] == '\t')) {
+    char *arg = line + 4;
+    while (*arg == ' ' || *arg == '\t') arg++;
+    size_t n = strlen(arg);   // cat khoang trang cuoi (Serial Monitor hay gui them)
+    while (n > 0 && (arg[n - 1] == ' ' || arg[n - 1] == '\t')) n--;
+    arg[n] = '\0';
+    if (*arg == '\0') {   // khong doi so -> in URL hien tai
+      Serial.printf("[CFG] URL server dang dung: %s%s\n",
+                    cfg.push_url[0] ? cfg.push_url : PUSH_URL,
+                    cfg.push_url[0] ? " (da luu NVS)" : " (mac dinh .ino)");
+      return;
+    }
+    if (strncmp(arg, "http://", 7) != 0 && strncmp(arg, "https://", 8) != 0) {
+      Serial.println("[CFG] URL phai bat dau bang http:// (khuyen dung) hoac https://");
+      return;
+    }
+    if (strlen(arg) >= sizeof(cfg.push_url)) {
+      Serial.println("[CFG] URL qua dai (toi da 127 ky tu)");
+      return;
+    }
+    strncpy(cfg.push_url, arg, sizeof(cfg.push_url) - 1);
+    cfg.push_url[sizeof(cfg.push_url) - 1] = '\0';
+    cfg_save();                    // luu NVS -> giu sau khi mat dien
+    g_push_url = cfg.push_url;     // dong bo trang /status
+    Serial.printf("[CFG] Da luu URL server (NVS): %s\n", cfg.push_url);
+    Serial.println("[CFG] Lan nhan nut ke tiep dung ngay, khong can reboot.");
+    return;
+  }
+  if (strcmp(line, "/help") == 0) {
+    Serial.println("[CFG] Lenh Serial:");
+    Serial.println("  /url                    - xem URL server dang dung");
+    Serial.println("  /url <http://ip:port/duong-dan> - doi + luu URL server (NVS)");
+    Serial.println("  /help                   - liet ke lenh");
+    return;
+  }
+  Serial.println("[CFG] Lenh khong hieu. Go /help de xem.");
+}
+
+static void serialPoll() {
+  static char line[160];
+  static size_t len = 0;
+  while (Serial.available() > 0) {
+    char ch = (char)Serial.read();
+    if (ch == '\r') continue;
+    if (ch == '\n') {
+      line[len] = '\0';
+      len = 0;
+      serialHandleCmd(line);
+      continue;
+    }
+    if (len + 1 < sizeof(line)) line[len++] = ch;   // tran -> bo phan thua
+  }
+}
+
 void setup() {
   Serial.begin(115200);
   // Tat debug log tren UART -> giam nhieu, stream muot hon nhieu
@@ -1050,9 +1119,11 @@ void setup() {
     Serial.print(WiFi.localIP());
     Serial.println("' to connect (trang cau hinh: /setup)");
   }
+  Serial.println("[CFG] Go /help tren Serial Monitor de xem lenh (vd /url doi server).");
 }
 
 void loop() {
+  serialPoll();   // lenh Serial (/url, /help) - khong block, chay moi che do
   if (cfg_setup_mode) {
     dnsServer.processNextRequest();   // captive portal: phan moi ten ve minh
   }

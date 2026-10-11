@@ -47,6 +47,13 @@ Một số lưu ý:
 - **Trang `/setup` cũng mở được khi đã kết nối WiFi** tại `http://<ip-esp32>/setup`.
 - API: `GET /api/cfg` (JSON cấu hình), `POST /api/cfg` (lưu, body `key=value&...`,
   `reset=1` = khôi phục mặc định), `GET /api/scan` (quét WiFi).
+- **Lệnh Serial** (Serial Monitor, baud 115200, Newline) — đổi URL server mà không
+  cần sửa code / nạp lại, lưu vào NVS (giữ sau khi mất điện):
+  - `/url` → in URL server đang dùng (kèm nguồn NVS hay mặc định `.ino`).
+  - `/url http://<ip-may>:5001/api/esp32/frame` → lưu URL mới, lần nhấn nút kế
+    tiếp dùng ngay, không cần reboot. URL phải bắt đầu bằng `http://`/`https://`,
+    tối đa 127 ký tự.
+  - `/help` → liệt kê lệnh.
 - Khi ở chế độ AP, điểm danh **chưa hoạt động** (chưa có mạng tới server) — vào
   `/setup`, bật "Xem ảnh trực tiếp" chỉnh hướng camera trước rồi cài mạng WiFi.
 
