@@ -5,7 +5,8 @@ Hệ thống điểm danh bằng khuôn mặt cho trường học:
 - **Điểm danh bằng nút bấm trên ESP32-CAM:** học sinh nhấn nút → thiết bị quét liên
   tục tối đa 15 giây (giữ flash sáng, POST từng khung lên server, trúng là dừng
   sớm) → server nhận diện, ghi điểm danh **theo buổi** (sáng/chiều) → ESP32 nháy
-  LED báo kết quả rồi **tắt camera**.
+  LED báo kết quả. Sensor chỉ chạy thật khi đang quét hoặc dev mở xem
+  (camera init 1 lần duy nhất rồi giữ nguyên — driver không chịu tắt/mở lại).
 - **Đăng ký khuôn mặt:** giáo viên / quản trị **upload ảnh lên** (không chụp tại camera).
 - **Một trang đăng nhập duy nhất** (`:5000`) — server tự điều hướng theo vai trò:
   **admin** (quản trị toàn trường) · **teacher** (giáo viên, chỉ lớp được gán) ·
@@ -61,7 +62,8 @@ Server: nhận diện → tìm trong DB → ghi điểm danh 1 dòng cho BUỔI 
 Trả JSON: {ok, matched, already, full_name, class_name, session, session_name, results}
    │
    ▼
-ESP32: tắt flash → nháy LED báo kết quả → giữ cam thêm 1,5 s → TẮT camera (sensor power down)
+ESP32: tắt flash → nháy LED báo kết quả → kết thúc phiên quét (camera vẫn init
+sẵn cho lần sau — driver không cho tắt/mở lại giữa chừng)
 ```
 
 ### Ý nghĩa nháy LED
@@ -365,15 +367,17 @@ Tab lạ → về tab đầu tiên của vai trò.
 | `BUTTON_POST_GAP_MS` | `300` | Nghỉ giữa 2 khung POST (~2–3 khung/giây) |
 | `BUTTON_MAX_FAILS` | `3` | POST lỗi liên tiếp quá mức này → báo 5 nháy, dừng quét |
 | `PUSH_URL` | `http://<ip-may>:5001/api/esp32/frame` | Server nhận ảnh (`:5001` = `CAMERA_PORT`) |
-| `CAM_OFF_DELAY_MS` | `1500` | Giữ cam sau khi quét xong rồi **tắt sensor** (PWDN HIGH) |
+| `CAM_OFF_DELAY_MS` | `1500` | Nhịp kết thúc phiên quét (giữ trước khi trả LED về trạng thái nghỉ) |
 | Flash | GPIO đèn flash | Giữ SÁNG suốt phiên quét (vừa chiếu sáng vừa báo "đang quét") |
 | LED báo | GPIO4 (ledcWrite, fallback GPIO33) | Nháy theo kết quả (bảng mục 2) |
 
 Luồng firmware: đánh thức camera (`camWake`) → flash 250 ms → lặp chụp +
 `POST PUSH_URL?capture=1` (multipart, field `file`, boundary `esp32cam`, tối đa
 15 giây, trúng là dừng) → parse JSON trả về bằng `strstr` (key ASCII, không cần
-thư viện JSON) → tắt flash → nháy LED → `camSleep`. Camera **không khởi động lúc
-boot** — chỉ bật khi có người bấm nút.
+thư viện JSON) → tắt flash → nháy LED → kết thúc phiên quét. Camera **không khởi
+động lúc boot** — chỉ init lần đầu khi có người bấm nút (hoặc dev mở xem), rồi
+giữ nguyên suốt uptime vì driver esp-camera hỏng khi deinit/reinit giữa chừng
+(init lại chết `frame buffer malloc failed`). Muốn tắt hoàn toàn thì reset board.
 
 Phản hồi của server (JSON top-level, key tiếng Việt ở giá trị):
 
@@ -384,8 +388,9 @@ Phản hồi của server (JSON top-level, key tiếng Việt ở giá trị):
  "count": 1, "results": [ ... ]}
 ```
 
-`GET /live?state=0|1` trên ESP32 (port 80) bật/tắt camera từ xa — trang debug
-dùng nút **Bật/Tắt cam ESP32** gọi qua proxy `/api/esp32/live`.
+`GET /live?state=1` trên ESP32 (port 80) bật camera từ xa (state=0 hiện không tắt
+được do giới hạn driver) — trang debug dùng nút **Bật/Tắt cam ESP32** gọi qua
+proxy `/api/esp32/live`.
 
 ### Các chế độ khác
 

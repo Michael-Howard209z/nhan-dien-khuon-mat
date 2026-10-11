@@ -85,7 +85,10 @@ Một số lưu ý:
    - Chưa khớp → quét tiếp; log Serial in `khung N: chua khop, quet tiep...`.
    - POST lỗi liên tiếp `BUTTON_MAX_FAILS` (3) lần → dừng, 5 nháy.
 4. Tắt flash → nháy LED theo kết quả + in log Serial (ASCII).
-5. Giữ cam bật thêm `CAM_OFF_DELAY_MS` (1500 ms) rồi `esp_camera_deinit` + PWDN = HIGH (tắt sensor).
+5. Giữ cam bật thêm `CAM_OFF_DELAY_MS` (1500 ms) rồi kết thúc phiên quét
+   (KHÔNG deinit: driver esp-camera không chịu deinit/reinit giữa chừng —
+   init lại sẽ chết `frame buffer malloc failed`; camera init 1 lần duy nhất
+   rồi giữ nguyên suốt uptime, sensor chỉ chạy thật khi quét hoặc stream).
 
 ### Ý nghĩa nháy LED (sau mỗi lần bấm)
 
@@ -114,15 +117,19 @@ Phản hồi server (HTTP 200, JSON top-level ASCII):
 Web server trên cổng 80 **vẫn chạy** trong chế độ nút nhấn để cấu hình camera:
 
 - `/` — trang cấu hình (độ phân giải, chất lượng, flash, xoay ảnh).
-- `/status` — JSON trạng thái; ngoài các trường cũ thêm `"cam_on":0|1` (sensor có đang bật)
-  và `"button":<GPIO>` (13, hoặc -1 nếu tắt chế độ nút). Khi cam đang OFF, `/status`
-  trả JSON tối giản (`cam_on:0`) nhưng trang web vẫn đọc được.
-- `/control?var=...&val=...` — chỉnh sensor (trả 503 nếu cam đang tắt).
+- `/status` — JSON trạng thái; ngoài các trường cũ thêm `"cam_on":0|1` (đã init
+  sensor chưa) và `"button":<GPIO>` (13, hoặc -1 nếu tắt chế độ nút). Cam chỉ ở
+  `cam_on:0` từ lúc boot đến lần quét/xem đầu tiên — sau đó luôn `1` (driver
+  không cho deinit/reinit giữa chừng nên giữ nguyên suốt uptime).
+- `/control?var=...&val=...` — chỉnh sensor (trả 503 nếu cam chưa từng bật).
 - `/flash?state=1|0` — bật/tắt đèn flash.
-- `/capture` — chụp 1 ảnh JPEG (tự `camWake()` nếu cam đang OFF; lỗi thì trả 503).
-- `/stream` (cổng 81) — stream MJPEG; **tự bật cam** khi có người mở, và trong lúc stream
-  chạy thì `camSleep()` sẽ **từ không cho tắt** (tránh deinit giữa khung hình).
-- **`GET /live?state=1`** → bật cam; **`GET /live?state=0`** → tắt cam.
+- `/capture` — chụp 1 ảnh JPEG (tự `camWake()` nếu cam chưa bật; lỗi thì trả 503).
+- `/stream` (cổng 81) — stream MJPEG; **tự bật cam** khi có người mở. Request tắt
+  cam trong lúc stream chạy bị bỏ qua (`camSleep()` hiện là no-op để tránh lỗi
+  driver deinit/reinit).
+- **`GET /live?state=1`** → bật cam (init lần đầu nếu chưa có); **`GET /live?state=0`**
+  hiện không tắt được (giữ nguyên để tránh lỗi driver — muốn tắt hoàn toàn thì
+  reset board).
   Trả `{"ok":1,"cam":0|1}` — dùng cho panel debug của server Python.
 
 ## 5. Cấu hình khuyến dùng cho nhận diện

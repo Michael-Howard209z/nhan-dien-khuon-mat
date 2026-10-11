@@ -85,7 +85,7 @@ extern volatile bool g_cam_on;       // true = camera da init/san sang chup
 extern volatile bool g_stream_active; // true = stream :81 dang chay -> camSleep() tu choi
 extern int g_button_pin;             // GPIO nut nhan (-1 = tat che do nut nhan)
 bool camWake();                      // bat camera (init lai neu can) -> false = loi
-void camSleep();                     // tat camera (chi khi khong stream)
+void camSleep();                     // giu nguyen camera (no-op, xem .ino)
 
 typedef struct {
   size_t size;   //number of values used for filtering
@@ -264,8 +264,8 @@ static esp_err_t stream_handler(httpd_req_t *req) {
     httpd_resp_send(req, NULL, 0);
     return ESP_FAIL;
   }
-  // Danh dau stream dang chay -> camSleep() (tu /live?state=0 hoac nhip tu
-  // tat cam cua nut nhan) KHONG duoc esp_camera_deinit giua khung hinh.
+  // Danh dau stream dang chay (chi de hien thi/phoi hop; camSleep hien la no-op
+  // de tranh loi driver deinit/reinit).
   // Bat dau tu day (truoc loop) de khong co khoang rong; moi duong ra deu
   // phai dat lai false.
   g_stream_active = true;
@@ -777,7 +777,8 @@ static esp_err_t flash_handler(httpd_req_t *req) {
 
 // Dieu khien nguon camera tu ben ngoai (panel debug cua server Python):
 //   GET /live?state=1 -> camWake() (bat camera)
-//   GET /live?state=0 -> camSleep() (tat camera; tu choi neu stream dang chay)
+//   GET /live?state=0 -> camSleep() (hien tai la no-op: driver khong chiu
+//     deinit/reinit giua chung; muon tat hoan toan thi reset board)
 // Tra ve {"ok":0|1,"cam":0|1} (cam = trang thai THUC TE sau khi xu ly).
 static esp_err_t live_handler(httpd_req_t *req) {
   char *buf = NULL;
@@ -793,7 +794,7 @@ static esp_err_t live_handler(httpd_req_t *req) {
       return httpd_resp_send(req, NULL, 0);
     }
   } else {
-    camSleep();   // neu stream dang chay -> camSleep() tu choi, cam van = 1
+    camSleep();   // hien la no-op (giua nguyen trang thai de tranh loi driver)
   }
 
   char resp[48];

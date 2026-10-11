@@ -19,10 +19,11 @@
 //         MJPEG chunked giu keep-alive lam treo worker Flask.
 //
 //   [C] BUTTON - CHE DO NUT NHAN (mac dinh, moi):  <-- khuyen dung
-//       - BUTTON_ENABLE = 1: cam DE OI (tat sensor) de gian CPU + PSRAM.
-//         Nhan nut GPIO13 -> day cam len -> bat flash -> chup 1 JPEG ->
-//         tat flash -> POST ?capture=1 len server -> LED phep biet ket qua ->
-//         tat cam lai sau CAM_OFF_DELAY_MS.
+//       - BUTTON_ENABLE = 1: camera init 1 LAN duy nhat luc can dau tien roi
+//         giu nguyen suot uptime (KHONG deinit: driver hong khi init lai).
+//         Nhan nut GPIO13 -> quet lien tuc toi da 15 giay (flash sang, POST
+//         tung khung ?capture=1, trung la dung som) -> tat flash ->
+//         LED phep biet ket qua. Sensor chi chay that khi quet hoac stream.
 //       - Khong co PUSH lien tuc, khong stream noi bo tu chay -> chip khong bi
 //         "doi" boi luong khung lien tuc (nguyen nhan treo truoc day).
 //       - Web :80 van chay de dev cau hinh cam (/control, /flash, /capture,
@@ -112,7 +113,6 @@ static DNSServer dnsServer;
                                  // 0 = tat flash khi quet: dung khi NGUON YEU (flash+WiFi+camera
                                  //     cung luc gay sut ap -> sensor treo, fb NULL). Can du anh
                                  //     sang moi truong neu tat flash.
-#define CAM_IDLE_SLEEP_MS 60000  // che do nut: dev xem :81 xong dong lai qua muc nay -> tu tat cam
 
 // BUTTON_ENABLE = 1 -> che do nhan POST 1 anh moi lan nhan nut, khong can
 // PUSH lien tuc nua. Neu nguoi dung de PUSH_ENABLE = 1 thi cung tu tat.
@@ -133,7 +133,7 @@ static DNSServer dnsServer;
 void startCameraServer();
 void setupLedFlash();
 bool camWake();          // bat camera (init lai neu can) -> true = OK
-void camSleep();         // tat camera (tu choi neu stream dang chay)
+void camSleep();  // GIU NGUYEN camera (khong deinit - xem dinh nghia duoi)
 #if defined(LED_GPIO_NUM)
 extern int led_duty;     // do sang flash, dinh nghia trong app_httpd.cpp (dong bo UI web)
 #endif
@@ -158,7 +158,7 @@ const char *g_push_url = PUSH_URL;   // se tro sang cfg.push_url sau cfg_load() 
 
 // ---------------- Trang thai camera (doc tu app_httpd.cpp) ----------------
 volatile bool g_cam_on = false;         // true = camera da init (che do nguoc: OFF khi nghi)
-volatile bool g_stream_active = false;  // true = stream :81 dang chay -> camSleep() khong duoc deinit
+volatile bool g_stream_active = false;  // true = stream :81 dang chay (chi de hien thi, camSleep hien la no-op)
 int g_button_pin = BUTTON_ENABLE ? BUTTON_PIN : -1;   // GPIO nut nhan, -1 = tat che do nut nhan
 
 #if PUSH_ONESHOT
@@ -558,7 +558,7 @@ static bool camWakeInit() {
   // PWDN cua sensor dang cap (active HIGH): keo LOW de nguon cho camera
   pinMode(PWDN_GPIO_NUM, OUTPUT);
   digitalWrite(PWDN_GPIO_NUM, LOW);
-  delay(5);   // cho nguon sensor on dinh truoc khi init I2C
+  delay(100);   // sensor vua duoc cap nguon tu OFF -> cho on dinh truoc khi init I2C
 #endif
 
   camera_config_t config;
@@ -677,18 +677,16 @@ bool camWake() {
   return ok;
 }
 
-// Tat camera: chi khi camera DANG bat va stream :81 KHONG chay.
-// -> esp_camera_deinit roi keo PWDN len cao (cat nguon sensor).
+// "Tat" camera: KHONG deinit that.
+// Ly do (chung minh bang log Serial): esp_camera_deinit() khong giai phong
+// sach heap DMA noi bo -> esp_camera_init() ke tiep chet voi
+// "cam_dma_config: frame buffer malloc failed" (cam brick den khi reset chip).
+// Vi vay: init 1 LAN duy nhat luc can dau tien, giu nguyen suot uptime.
+// Sensor chi chay that khi co fb_get (/quet nut) hoac :81 stream; luc nghi
+// tieu thu them ~100mA so voi deinit - chap nhan duoc de doi lay chay on dinh.
+// Muon tat hoan toan -> reset board. API giu nguyen de /live va loop khong doi.
 void camSleep() {
-  if (!g_cam_on) return;
-  if (g_stream_active) return;   // dang stream -> khong duoc deinit giua frame
-  delay(50);                     // cho cac handler dang chay xong khung hoi
-  if (g_stream_active) return;   // kiem tra lai sau delay
-  esp_camera_deinit();
-#if defined(PWDN_GPIO_NUM) && (PWDN_GPIO_NUM >= 0)
-  digitalWrite(PWDN_GPIO_NUM, HIGH);  // PWDN cao -> sensor mat nguon
-#endif
-  g_cam_on = false;
+  return;   // co y khong lam gi
 }
 
 // ============================================================================
@@ -740,11 +738,9 @@ static bool buttonPressedEvent() {
   return false;
 }
 
-// Yeu cau tat cam sau CAM_OFF_DELAY_MS (van dung duoc khi stream dang chay:
-// loop() se thu lai moi lan cho den khi g_stream_active = false)
+// Hen gio ket thuc phien quet (goi camSleep() hien la no-op, giu de API on dinh)
 static uint32_t g_sleep_at = 0;
 static bool g_sleep_req = false;
-static uint32_t stream_off_at = 0;   // luc stream :81 vua dong (0 = khong theo doi)
 static void cam_sleep_request() {
   g_sleep_at = millis() + CAM_OFF_DELAY_MS;
   g_sleep_req = true;
@@ -774,10 +770,9 @@ static void doButtonCapture() {
     btnBlink(5, 60, 60);
     return;
   }
-  // Xoa lich tat cam cu + moc stream cu: tranh truong hop nhan 2 lan lien nhau
-  // (lich tat cua lan truoc chua kip chay) tat cam GIUA phien quet moi.
+  // Xoa lich tat cam cu: tranh truong hop nhan 2 lan lien nhau
+  // (lich tat cua lan truoc chua kip chay) anh huong phien quet moi.
   g_sleep_req = false;
-  stream_off_at = 0;
   if (!push_ensure_buf()) {
     Serial.println("[BTN] loi: khong cap duoc bo dem POST (het RAM/PSRAM)");
     btnBlink(5, 60, 60);
@@ -814,22 +809,12 @@ static void doButtonCapture() {
 
   uint32_t t_end = millis() + (uint32_t)BUTTON_SCAN_SECONDS * 1000UL;
   int frames = 0, fails = 0;
-  bool rewoke = false;   // da thu day lai camera 1 lan trong phien nay chua
   int outcome = 0;   // 0 = het gio chua khop, 1 = diem danh OK, 2 = da diem danh, 5 = loi mang
   char final_name[64];
   final_name[0] = '\0';
 
   while ((int32_t)(t_end - millis()) > 0 && outcome == 0) {
     camera_fb_t *fb = esp_camera_fb_get();
-    if (!fb && !rewoke) {
-      // Sensor treo (init OK nhung khong ra khung, thuong do sut ap nguon):
-      // thu tat-mo lai camera 1 lan thay vi bo cuoc ngay.
-      Serial.println("[BTN] fb NULL -> thu day lai camera 1 lan...");
-      rewoke = true;
-      camSleep();
-      delay(200);
-      if (camWake()) fb = esp_camera_fb_get();
-    }
     if (!fb) {
       Serial.println("[BTN] loi: chup anh that bai");
       fails++;
@@ -908,7 +893,7 @@ static void doButtonCapture() {
                   BUTTON_SCAN_SECONDS, frames);
     btnBlink(3, 120, 120);            // 3 nhap ngan
   }
-  cam_sleep_request();                // tat cam sau CAM_OFF_DELAY_MS
+  cam_sleep_request();                // het phien quet (hien la no-op, giu API)
 }
 
 // Poll nut nhan (khong block): debounce + xuong canh + cooldown
@@ -1168,22 +1153,11 @@ void loop() {
 
   buttonPoll();   // nhan nut -> quet lien tuc toi da 15 giay (block trong phien quet)
 
-  // Tat cam sau CAM_OFF_DELAY_MS; neu stream dang chay thi giu yeu cau va thu lai
+  // Nhin tat cam theo lich (hien tai camSleep() la no-op de tranh loi driver;
+  // giu lai loi goi de API khong doi).
   if (g_sleep_req && (int32_t)(millis() - g_sleep_at) >= 0 && !g_stream_active) {
     g_sleep_req = false;
     camSleep();
-  }
-
-  // Tu tat cam khi idle: dev mo :81 xem xong roi dong lai ma quen tat cam ->
-  // cam khong duoc phep sang mai (che do nut: cam chi bat khi quet hoac dev xem).
-  static bool last_stream = false;
-  bool s = g_stream_active;
-  if (last_stream && !s) stream_off_at = millis();   // stream vua dong -> bat dau dem
-  last_stream = s;
-  if (!s && !g_sleep_req && stream_off_at != 0 &&
-      (int32_t)(millis() - stream_off_at) >= (int32_t)CAM_IDLE_SLEEP_MS) {
-    stream_off_at = 0;
-    camSleep();   // tu return neu cam dang OFF
   }
   delay(5);   // nhe CPU, van du do cho debounce 30ms
 #else
