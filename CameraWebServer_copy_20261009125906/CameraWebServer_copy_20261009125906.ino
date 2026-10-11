@@ -91,6 +91,7 @@ static DNSServer dnsServer;
 // ==================================================================
 #define BUTTON_ENABLE     1       // 1 = che do nut nhan (cam OFF khi nghi, nhan nut = quet lien tuc + POST diem danh)
                                   // 0 = quay lai che do cu (PULL/PUSH lien tuc, cam luon bat)
+#define FW_VERSION "2026-10-11-vga-scan"  // in ra Serial luc boot de biet board dang chay ban nao
 #define BUTTON_PIN       13     // GPIO13, INPUT_PULLUP: nut nhan noi GPIO13 -> GND, nhan xuong = muc THAP (active LOW)
 //  Sao khong dung cac chan khac:
 //   - GPIO12 (MTDI): strapping pin. Nut keo LOW luc boot se doi thanh suc
@@ -1033,6 +1034,7 @@ void setup() {
 
   // Doc cau hinh da luu trong NVS (lan dau: mac dinh ssid/password/PUSH_URL
   // o tren file .ino). Sau nay sua tren trang web /setup, khong can code lai.
+  Serial.printf("[CFG] Firmware: %s\n", FW_VERSION);
   cfg_load(ssid, password, PUSH_URL);
   g_push_url = cfg.push_url;   // trang /status tren web hien URL dang dung
 
