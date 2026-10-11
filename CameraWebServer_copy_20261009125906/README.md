@@ -144,6 +144,25 @@ Web server trên cổng 80 **vẫn chạy** trong chế độ nút nhấn để 
 - `PUSH_ENABLE = 0` + `BUTTON_ENABLE = 0` → PULL (server kéo `:81/stream`).
 - `CAM_OFF_DELAY_MS` — thời gian giữ cam sau khi gửi xong (mặc định 1500 ms).
 - `BUTTON_PIN` — GPIO của nút (mặc định 13, kéo nội lên, kích mức thấp).
+- `BUTTON_SCAN_FLASH` — `1` = giữ flash sáng khi quét (mặc định); `0` = quét không
+  flash, dùng khi **nguồn yếu** (xem mục sự cố dưới).
+
+### Sự cố: `chup anh that bai` (fb NULL) + 5 nháy dù WiFi tốt
+
+Init camera OK nhưng sensor không ra khung nào (mỗi lần treo vài giây) — điển
+hình là **nguồn nuôi yếu**: flash + WiFi công suất max + camera cùng lúc làm sụt
+áp, sensor treo trong khi CPU/WiFi vẫn sống.
+
+1. **Đổi nguồn trước:** sạc điện thoại 5V⎓2A cấp thẳng vào chân **5V + GND**
+   (dây ngắn, to), không nuôi qua cáp USB-UART mảnh/cổng laptop yếu.
+2. Nạp firmware mới, bấm nút, đọc dòng chẩn đoán:
+   `[BTN] PSRAM: co/khong, heap: ..., SPIRAM: ..., sensor PID: 0x...`
+   - `PID: 0x0000` → sensor mất giao tiếp (nguồn/dây).
+   - `PSRAM: KHONG` → board không có PSRAM hoặc chọn sai board (phải là
+     `AI Thinker ESP32-CAM`, PSRAM Enabled).
+   - PID `0x2642` (OV2640) + vẫn NULL → nguồn vẫn yếu, làm bước 1 kỹ hơn.
+3. Tạm thời đặt `BUTTON_SCAN_FLASH = 0`, nạp lại, quét dưới ánh sáng môi trường
+   đủ (giảm dòng tiêu thụ lúc quét).
 
 ## 7. Nạp firmware
 

@@ -108,6 +108,10 @@ static DNSServer dnsServer;
 #define BUTTON_SCAN_SECONDS 15   // nhan nut -> quet lien tuc TOI DA 15 giay (trung mat la dung som)
 #define BUTTON_POST_GAP_MS 300   // nghi giua 2 khung POST lien tiep (~2-3 khung/giay)
 #define BUTTON_MAX_FAILS 3       // POST loi LIEN TIEP qua muc nay -> bao 5 nhap, dung quet
+#define BUTTON_SCAN_FLASH 1      // 1 = giu flash sang suot luc quet (sang, ro mat).
+                                 // 0 = tat flash khi quet: dung khi NGUON YEU (flash+WiFi+camera
+                                 //     cung luc gay sut ap -> sensor treo, fb NULL). Can du anh
+                                 //     sang moi truong neu tat flash.
 #define CAM_IDLE_SLEEP_MS 60000  // che do nut: dev xem :81 xong dong lai qua muc nay -> tu tat cam
 
 // BUTTON_ENABLE = 1 -> che do nhan POST 1 anh moi lan nhan nut, khong can
@@ -775,6 +779,7 @@ static void doButtonCapture() {
   g_sleep_req = false;
   stream_off_at = 0;
   if (!push_ensure_buf()) {
+    Serial.println("[BTN] loi: khong cap duoc bo dem POST (het RAM/PSRAM)");
     btnBlink(5, 60, 60);
     cam_sleep_request();
     return;
@@ -789,17 +794,42 @@ static void doButtonCapture() {
   // GIU flash SANG SUOT luc quet -> anh sang on dinh, nhan dien chuan hon
   // (flash sang lien tuc cung la tin hieu "dang quet" cho nguoi dung).
   // (cf. comment trong app_httpd.cpp, capture_handler)
+#if BUTTON_SCAN_FLASH
   btnLed(true);
   delay(250);
+#else
+  Serial.println("[BTN] BUTTON_SCAN_FLASH=0 -> quet khong flash (can du sang moi truong)");
+#endif
+
+  // Chan doan phan cung: in 1 lan moi phien quet. PID dung phai la 0x2642
+  // (OV2640); PID 0x0000/0xFFFF = sensor mat giao tiep (nguon yeu / loi day).
+  {
+    sensor_t *sens = esp_camera_sensor_get();
+    Serial.printf("[BTN] PSRAM: %s, heap: %u, SPIRAM: %u, sensor PID: 0x%04x\n",
+                  psramFound() ? "co" : "KHONG",
+                  (unsigned)ESP.getFreeHeap(),
+                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                  sens ? (unsigned)sens->id.PID : 0);
+  }
 
   uint32_t t_end = millis() + (uint32_t)BUTTON_SCAN_SECONDS * 1000UL;
   int frames = 0, fails = 0;
+  bool rewoke = false;   // da thu day lai camera 1 lan trong phien nay chua
   int outcome = 0;   // 0 = het gio chua khop, 1 = diem danh OK, 2 = da diem danh, 5 = loi mang
   char final_name[64];
   final_name[0] = '\0';
 
   while ((int32_t)(t_end - millis()) > 0 && outcome == 0) {
     camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb && !rewoke) {
+      // Sensor treo (init OK nhung khong ra khung, thuong do sut ap nguon):
+      // thu tat-mo lai camera 1 lan thay vi bo cuoc ngay.
+      Serial.println("[BTN] fb NULL -> thu day lai camera 1 lan...");
+      rewoke = true;
+      camSleep();
+      delay(200);
+      if (camWake()) fb = esp_camera_fb_get();
+    }
     if (!fb) {
       Serial.println("[BTN] loi: chup anh that bai");
       fails++;
