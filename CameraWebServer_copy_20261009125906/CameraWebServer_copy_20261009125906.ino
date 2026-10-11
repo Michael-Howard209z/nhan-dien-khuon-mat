@@ -181,7 +181,7 @@ static void push_parse_url() {
   int p = u.indexOf("://");
   p = (p < 0) ? 0 : p + 3;
   int slash = u.indexOf('/', p);
-  String hp = (slash < 0) ? u.substring(p) : u.substring(slash);
+  String hp = (slash < 0) ? u.substring(p) : u.substring(p, slash);
   push_path = (slash < 0) ? "/" : u.substring(slash);
   int c = hp.lastIndexOf(':');
   if (c > 0) {
