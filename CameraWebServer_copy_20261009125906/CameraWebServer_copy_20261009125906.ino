@@ -783,6 +783,20 @@ static void doButtonCapture() {
   if (push_path.indexOf('?') < 0) push_path += "?capture=1";
   Client *c = push_client();
 
+  // Ep sensor ve cau hinh quet chuan MOI phien: dev/user doi size/quality
+  // tren web giua chung (vd XGA vuot qua bo dem VGA cap luc init) se lam
+  // fb NULL mai. Chi doi khi lech (VGA von la cai dat init -> an toan).
+  {
+    sensor_t *sens0 = esp_camera_sensor_get();
+    if (sens0) {
+      if (sens0->status.framesize != FRAMESIZE_VGA) {
+        Serial.println("[BTN] framesize bi doi tren web -> ep ve VGA cho phien quet");
+        sens0->set_framesize(sens0, FRAMESIZE_VGA);
+      }
+      if (sens0->status.quality != 12) sens0->set_quality(sens0, 12);
+    }
+  }
+
   // Bat flash TRUOC khi quet: sensor can LED sang ~250ms moi thay trong anh.
   // GIU flash SANG SUOT luc quet -> anh sang on dinh, nhan dien chuan hon
   // (flash sang lien tuc cung la tin hieu "dang quet" cho nguoi dung).
@@ -1116,7 +1130,7 @@ void setup() {
 
 #if BUTTON_ENABLE
   Serial.printf("[BTN] Che do nut nhan: nut GPIO%d -> GND (nhan xuong = muc thap)\n", BUTTON_PIN);
-  Serial.printf("[BTN] LED phep tren GPIO%d, quet toi da %d giay moi lan nhan -> %s?capture=1\n",
+  Serial.printf("[BTN] LED phep tren GPIO%d, quet toi da %d giay moi lan nhan -> %s (+?capture=1)\n",
 #if defined(LED_GPIO_NUM)
                 LED_GPIO_NUM,
 #else
