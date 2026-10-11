@@ -1076,7 +1076,8 @@ void setup() {
     WiFi.mode(WIFI_STA);                   // tat AP cho do ton RAM/CPU
     WiFi.setAutoReconnect(true);
     WiFi.setSleep(false);                  // tat sleep -> HTTP nhanh, it lag
-    WiFi.setTxPower(WIFI_POWER_19_5dBm);   // phat cong suat toi da -> song WiFi khoe hon
+    // KHONG ep TxPower max: ban minimal (mac dinh) chay on dinh, con max TX
+    // + camera + flash cung luc de gay sut ap tren nguon yeu -> sensor treo.
     if (cfg.use_static_ip) cfg_apply_static_ip();   // IP tinh PHAI cai TRUOC WiFi.begin()
     WiFi.begin(cfg.wifi_ssid, cfg.wifi_pass);
 
