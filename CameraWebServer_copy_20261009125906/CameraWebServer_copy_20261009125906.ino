@@ -585,24 +585,25 @@ static bool camWakeInit() {
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   // Cau hinh giong ban minimal da chung minh chay on dinh tren OV5640:
-  // VGA + quality 12 + fb_count 1 + GRAB_WHEN_EMPTY.
-  // (QVGA set sau init lam sensor OV5640 treo, fb NULL mai - khong dung nua.)
-  // VGA con tot hon cho diem danh xa 2-3m (mat nhieu pixel hon de nhan dien).
+  // VGA + quality 12 + GRAB_LATEST. RIENG fb_count=2 (khac minimal): phai du
+  // cho 2 consumer cung luc (vong quet nut + tab :81 stream mo nen) - fb_count=1
+  // se treo khi 2 ben giu 1 buffer (fb NULL 4s). Trung lap thi server tu loai
+  // (already) nen khung trung khong hai gi.
   config.frame_size = FRAMESIZE_VGA;
   config.pixel_format = PIXFORMAT_JPEG;     // for streaming
   //config.pixel_format = PIXFORMAT_RGB565; // for face detection/recognition
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY; // lay khung tuan tu, on dinh
+  config.grab_mode = CAMERA_GRAB_LATEST;    // khong block khi tranh buffer -> it treo
   config.fb_location = CAMERA_FB_IN_PSRAM;
   config.jpeg_quality = 12;                  // 12=net/khoe, 15=can bang, 20-25=nhe/muot (0..63, so cang lon cang nhe)
-  config.fb_count = 1;                       // 1 buffer -> it ton RAM, du cho nhip quet 2-3 khung/giay
+  config.fb_count = 2;                       // 2 buffer: nut quet + :81 stream moi ben 1 cai
 
   // if PSRAM IC present, init with UXGA resolution and higher JPEG quality
   //                      for larger pre-allocated frame buffer.
   if (config.pixel_format == PIXFORMAT_JPEG) {
     if (psramFound()) {
       config.jpeg_quality = 12;
-      config.fb_count = 1;
-      config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+      config.fb_count = 2;
+      config.grab_mode = CAMERA_GRAB_LATEST;
       config.fb_location = CAMERA_FB_IN_PSRAM;
     } else {
       // Limit the frame size when PSRAM is not available
