@@ -465,10 +465,12 @@ function pollStatus(){
         hint.textContent = '';
       }
     }
+    var galleryEmpty = (en.faces_loaded || 0) <= 0;
     $('modelState').textContent =
       (ENGINE_NAME[en.detector] || en.detector || '?') + ' + ' +
       (ENGINE_NAME[en.recognizer] || en.recognizer || '?') +
-      (d.students ? ' · ' + d.students + ' người' : '');
+      (d.students ? ' · ' + d.students + ' người' : '') +
+      (galleryEmpty ? ' · CHƯA CÓ MẪU MẶT NÀO — đăng ký ở cổng quản lý trước, không thì nút bấm chỉ nháy 3 cái' : '');
     $('stuCount').textContent = d.students;
     $('faceCount').textContent = d.faces == null ? 0 : d.faces;
     $('matchCount').textContent = d.matched == null ? 0 : d.matched;

@@ -68,13 +68,18 @@ sẵn cho lần sau — driver không cho tắt/mở lại giữa chừng)
 
 ### Ý nghĩa nháy LED
 
+Tách 3 chặng (chụp → gửi → khớp) để đoán lỗi: **tích** = đã chụp + đã gửi
+(không nói gì về nhận diện) → **mẫu nháy** = kết quả.
+
 | Mẫu nháy | Ý nghĩa |
 |---|---|
 | Flash **sáng liên tục** | Đang quét (tối đa 15 giây) — đứng yên trước camera |
+| **Chớp 80–100 ms sau mỗi khung** | Đã chụp + đã gửi tới server. Chĩa vào cái cốc cũng phải thấy tích — không thấy tích nào mà cuối 4/5 nháy = lỗi chụp/gửi, không phải lỗi nhận diện |
 | **1 nháy dài ~800 ms** | Điểm danh OK (`matched ≥ 1, already:false`) |
 | **2 nháy vừa ~300 ms** | Đã nhận ra nhưng **đã điểm danh buổi này rồi** (`already:true`) |
-| **3 nháy ngắn ~120 ms** | Hết 15 giây mà không thấy mặt / không khớp ai |
-| **5 nháy nhanh ~60 ms** | Lỗi mạng / lỗi server / POST lỗi liên tiếp |
+| **3 nháy ngắn ~120 ms** | Đã gửi OK nhưng không khớp — xem Serial: không thấy mặt / server chưa có mẫu nào / thấy mặt nhưng lạ |
+| **4 nháy ngắn ~120 ms** | Không chụp được khung nào (lỗi camera/nguồn) |
+| **5 nháy nhanh ~60 ms** | Không gửi được (lỗi mạng / lỗi server / POST lỗi liên tiếp) |
 
 ### Điểm danh theo buổi — tối đa 1 lần/buổi
 

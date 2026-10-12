@@ -79,10 +79,13 @@ Một số lưu ý:
    suốt phiên quét** (ánh sáng ổn định, đồng thời là tín hiệu "đang quét").
 3. Lặp (~2–3 khung/giây, tối đa `BUTTON_SCAN_SECONDS` = 15 giây):
    chụp 1 JPEG → `POST PUSH_URL?capture=1` (multipart/form-data, field `file`,
-   boundary `esp32cam`) → đọc JSON phản hồi ngay.
+   boundary `esp32cam`) → đọc JSON phản hồi ngay. Mỗi POST 2xx nháy **tích**
+   80–100 ms (báo "đã chụp + đã gửi", tách bạch với kết quả nhận diện).
    - `matched ≥ 1, already:false` → điểm danh OK → **dừng sớm**, 1 nháy dài.
    - `matched ≥ 1, already:true` → đã điểm danh buổi này → **dừng sớm**, 2 nháy.
-   - Chưa khớp → quét tiếp; log Serial in `khung N: chua khop, quet tiep...`.
+   - Chưa khớp → quét tiếp; log Serial phân loại: `server CHUA CO MAU` /
+     `khong thay mat` (khung trống) / `thay N mat nhung khong khop`.
+   - Lỗi chụp liên tiếp (`fb NULL`) → dừng, **4 nháy** (lỗi camera, khác 5 nháy mạng).
    - POST lỗi liên tiếp `BUTTON_MAX_FAILS` (3) lần → dừng, 5 nháy.
 4. Tắt flash → nháy LED theo kết quả + in log Serial (ASCII).
 5. Giữ cam bật thêm `CAM_OFF_DELAY_MS` (1500 ms) rồi kết thúc phiên quét
@@ -92,13 +95,18 @@ Một số lưu ý:
 
 ### Ý nghĩa nháy LED (sau mỗi lần bấm)
 
+Tách 3 chặng để đoán lỗi (vd chĩa camera vào cái cốc): **tích** = đã chụp + đã
+gửi tới server (chưa nói gì về nhận diện) → **mẫu nháy** = kết quả.
+
 | Mẫu nháy | Ý nghĩa |
 |---|---|
+| **Chớp tắt 80–100 ms sau mỗi khung gửi thành công** | Đã chụp + đã gửi (tích). Thấy tích đều mà cuối 3 nháy = camera + mạng tốt, chỉ không khớp mặt |
 | **Sáng cố định ~1,5 s khi boot** | Firmware đã chạy, sẵn sàng (khác mọi mẫu nháy kết quả) |
 | **1 nháy dài ~800 ms** | Điểm danh OK — log Serial in `[BTN] Diem danh OK: <họ tên>` |
 | **2 nháy vừa ~300 ms** | Đã nhận diện được nhưng **đã điểm danh rồi** trong buổi này (`already:true`) |
-| **3 nháy ngắn ~120 ms** | Hết 15 giây quét mà không thấy mặt / không khớp ai (`matched:0` mọi khung) |
-| **5 nháy nhanh ~60 ms** | Lỗi mạng / lỗi server (connect fail, HTTP != 2xx, **hoặc WiFi chưa kết nối**) |
+| **3 nháy ngắn ~120 ms** | Đã gửi OK nhưng không khớp — xem Serial: `khong thay mat` (khung trống/chụp vật) · `server CHUA CO MAU` (chưa đăng ký ai) · `thay N mat nhung khong khop` (người lạ) |
+| **4 nháy ngắn ~120 ms** | Không chụp được khung nào (lỗi camera/nguồn — không hề có tích nào trước đó) |
+| **5 nháy nhanh ~60 ms** | Không gửi được (lỗi mạng / lỗi server: connect fail, HTTP != 2xx, **hoặc WiFi chưa kết nối**) |
 
 > **WiFi chưa lên sau 20 s → firmware tự chuyển sang chế độ AP cấu hình** (mục 2):
 > kết nối vào mạng `ESP32-CAM-Setup` rồi mở `http://192.168.4.1/` để sửa WiFi/server.

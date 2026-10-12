@@ -286,14 +286,25 @@ def reset_identity_state():
     engine.reset_tracker()
 
 
+def _gallery_ids() -> int:
+    """Số người có mẫu trong gallery (0 = server chưa đăng ký khuôn mặt ai).
+
+    ESP32 dùng để phân biệt "không khớp vì lạ" với "không thể khớp vì chưa
+    có mẫu" (xem _sample_hint phía dưới và LED 3 nháy + Serial).
+    """
+    m = engine.matcher
+    return len(m.gallery) + len(m.gallery_gray)
+
+
 def record_results(results):
     """Ghi điểm danh cho các kết quả khớp. Chỉ dùng khi CHẤM ĐIỂM DANH (capture).
 
     Trả về dict kết quả đầu tiên để phản hồi cho ESP32:
-      {'matched', 'already', 'full_name', 'class_name', 'session', 'session_name'}
+      {'matched', 'already', 'full_name', 'class_name', 'session', 'session_name',
+       'ids' (số người đã đăng ký mẫu)}
     """
     summary = {"matched": 0, "already": False, "full_name": "", "class_name": "",
-               "session": 0, "session_name": ""}
+               "session": 0, "session_name": "", "ids": _gallery_ids()}
     for r in results:
         if not r.get("match"):
             continue
@@ -977,7 +988,7 @@ def api_esp32_frame():
         return jsonify({"ok": True, "results": cached, "count": len(cached),
                         "cached": True, "matched": 0, "already": False,
                         "full_name": "", "class_name": "", "session": 0,
-                        "session_name": ""})
+                        "session_name": "", "ids": _gallery_ids()})
 
     # Nhận diện đồng bộ cho đúng ảnh vừa nhận; capture=1 -> ghi điểm danh.
     results, _annotated = engine.process(img, draw=False, track=False)

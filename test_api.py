@@ -305,6 +305,10 @@ def main():
                                                       ('matched', 'already', 'full_name',
                                                        'session', 'session_name')}))
     check("lần đầu -> already=false", d.get("already") is False, str(d.get("already")))
+    check("JSON capture có count (số mặt) + ids (số người đã đăng ký) cho firmware",
+          isinstance(d.get("count"), int) and isinstance(d.get("ids"), int)
+          and d.get("ids") >= 1,
+          json.dumps({k: d.get(k) for k in ('count', 'ids')}))
     r = requests.post(f"{CAM}/api/esp32/frame?capture=1", data=A[0],
                       headers={"Content-Type": "image/jpeg"})
     d2 = r.json()

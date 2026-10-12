@@ -148,7 +148,8 @@ static void btnBlink(int count, int on_ms, int off_ms);
 static void btnLed(bool on);
 static bool push_ensure_buf();
 static int push_read_response_body(Client *c, char *buf, size_t buf_sz, int timeout_ms);
-static int btn_parse_result(const char *json, int *already, char *out_name, size_t name_sz);
+static int btn_parse_result(const char *json, int *already, int *faces, int *ids,
+                            char *out_name, size_t name_sz);
 #endif
 
 static void serialPoll();   // lenh Serial (/url, /help): doi URL server khong can nap lai
@@ -390,11 +391,17 @@ static int push_read_response_body(Client *c, char *buf, size_t buf_sz, int time
 }
 
 // Doc JSON phan hoi server (khoa ASCII o TOP LEVEL -> strstr la du):
-//   {"ok":true,"matched":1,"already":false,"full_name":"Nguyen Van A",...}
-// Tra ve matched (0/1); *already = 1 neu da diem danh roi; ten day vao out_name.
-static int btn_parse_result(const char *json, int *already, char *out_name, size_t name_sz) {
+//   {"ok":true,"matched":1,"already":false,"full_name":"Nguyen Van A",
+//    "count":1,"ids":5,...}
+// Tra ve matched (0/1); *already = 1 neu da diem danh roi; *faces = so mat
+// thay trong khung (count); *ids = so nguoi da dang ky mau (-1 neu thieu key);
+// ten day vao out_name. Con tro NULL duoc bo qua (tuong thich server cu).
+static int btn_parse_result(const char *json, int *already, int *faces, int *ids,
+                            char *out_name, size_t name_sz) {
   int matched = 0;
   if (already) *already = 0;
+  if (faces) *faces = 0;
+  if (ids) *ids = -1;
   if (out_name && name_sz) out_name[0] = 0;
   if (!json) return 0;
 
@@ -407,6 +414,12 @@ static int btn_parse_result(const char *json, int *already, char *out_name, size
     while (*a == ' ') a++;
     if (strncmp(a, "true", 4) == 0 && already) *already = 1;
   }
+
+  const char *c = strstr(json, "\"count\":");
+  if (c && faces) *faces = atoi(c + 8);   // atoi tu bo khoang trang
+
+  const char *g = strstr(json, "\"ids\":");
+  if (g && ids) *ids = atoi(g + 6);
 
   const char *f = strstr(json, "\"full_name\":\"");
   if (f && out_name && name_sz) {
@@ -706,11 +719,17 @@ static void btnLed(bool on) {
 #endif
 }
 
-// Cac mau phep biet sau moi lan nhan:
+// Tin hieu trong phien quet (tach 3 chang de doan loi, vd chup cai coc):
+//   tich chop 80-100ms sau moi POST 2xx -> "da chup + da gui toi server"
+//     (khong noi gi ve nhan dien - ket qua o cac mau duoi)
+// Cac mau phep biet cuoi phien:
 //   1 nhap dai 800ms  -> diem danh OK (in ten len Serial)
 //   2 nhap vua 300ms  -> nhan dien duoc NHUNG da diem danh roi trong buoi nay
-//   3 nhap ngan 120ms -> khong nhan dien duoc mat / khong khop ai
-//   5 nhanh 60ms      -> loi mang / loi server (connect fail hoac HTTP != 2xx)
+//   3 nhap ngan 120ms -> da gui OK nhung khong khop (xem Serial: khong thay mat
+//                        / gallery rong / thay mat nhung la)
+//   4 nhap ngan 120ms -> khong chup duoc khung nao (loi camera/nguon)
+//   5 nhanh 60ms      -> khong gui duoc (loi mang / server: connect fail,
+//                        HTTP != 2xx)
 static void btnBlink(int count, int on_ms, int off_ms) {
   for (int i = 0; i < count; i++) {
     btnLed(true);
@@ -748,11 +767,10 @@ static void cam_sleep_request() {
   g_sleep_req = true;
 }
 
-// Mot lan nhan nut = 1 phien quet: day cam -> flash ON (giu sang suot luc
-// quet) -> lap: chup -> POST ?capture=1 -> doc JSON phan hoi:
-//   - diem danh OK / da diem danh -> DUNG SOM, LED phep
-//   - het BUTTON_SCAN_SECONDS ma chua khop -> 3 nhap
-//   - POST loi lien tiep BUTTON_MAX_FAILS lan -> 5 nhap, dung quet
+// Mot lan nhan nut = 1 phien quet: day cam -> flash tuy che do -> lap:
+// chup -> POST ?capture=1 -> doc JSON -> LED phep. Phan hoi tach 3 chang:
+//   CHUP (4 nhap neu khong co khung) / GUI (tich 1 nhap + 5 nhap neu loi mang)
+//   / KHOP (1 dai OK, 2 vua da diem danh, 3 ngan khong khop).
 // Moi khung deu kem ?capture=1 nen server tu loai trung theo buoi (already).
 static void doButtonCapture() {
   static char resp[2816];   // header ~256B + body cap ~2.5KB (static -> khong ton stack)
@@ -824,20 +842,23 @@ static void doButtonCapture() {
   }
 
   uint32_t t_end = millis() + (uint32_t)BUTTON_SCAN_SECONDS * 1000UL;
-  int frames = 0, fails = 0;
-  int outcome = 0;   // 0 = het gio chua khop, 1 = diem danh OK, 2 = da diem danh, 5 = loi mang
+  int frames = 0, fails = 0, last_fail = 0;  // last_fail: 4 = loi CHUP, 5 = loi GUI
+  int outcome = 0;   // 0 = het gio chua khop, 1 = diem danh OK, 2 = da diem danh,
+                     // 4 = khong chup duoc khung, 5 = loi mang
   char final_name[64];
   final_name[0] = '\0';
 
   while ((int32_t)(t_end - millis()) > 0 && outcome == 0) {
     camera_fb_t *fb = esp_camera_fb_get();
     if (!fb) {
-      Serial.println("[BTN] loi: chup anh that bai");
+      Serial.println("[BTN] loi CAMERA: khong chup duoc khung nao (kiem tra cam/nguon)");
       fails++;
+      last_fail = 4;
     } else if (fb->len > PUSH_JPEG_MAX) {
-      Serial.printf("[BTN] loi: khung qua lon (%u bytes)\n", (unsigned)fb->len);
+      Serial.printf("[BTN] loi CAMERA: khung qua lon (%u bytes)\n", (unsigned)fb->len);
       esp_camera_fb_return(fb);
       fails++;
+      last_fail = 4;
     } else {
       size_t len = fb->len;
       memcpy(push_buf, fb->buf, fb->len);
@@ -849,6 +870,7 @@ static void doButtonCapture() {
                       push_host.c_str(), push_port);
         c->stop();
         fails++;
+        last_fail = 5;
       } else {
         bool sent = push_post_frame(c, push_buf, len);
         int code = push_read_response_body(c, resp, sizeof(resp), 3000);
@@ -857,15 +879,29 @@ static void doButtonCapture() {
         if (!sent || code < 200 || code >= 300) {
           Serial.printf("[BTN] loi server: POST that bai (HTTP %d)\n", code);
           fails++;
+          last_fail = 5;
         } else {
           fails = 0;   // POST thanh cong -> xoa dem loi lien tiep
           g_push_ok = g_push_ok + 1;
           g_push_state = 1;
 
-          int already = 0;
+          // Tich "da chup + da gui" (rieng voi ket qua nhan dien phia sau):
+          // chop tat 80ms giua nen flash sang, hoac nhap sang 100ms giua nen toi.
+#if BUTTON_SCAN_FLASH
+          btnLed(false);
+          delay(80);
+          btnLed(true);
+#else
+          btnLed(true);
+          delay(100);
+          btnLed(false);
+#endif
+
+          int already = 0, faces = -1, ids = -1;
           char name[64];
           name[0] = '\0';
-          int matched = btn_parse_result(resp, &already, name, sizeof(name));
+          int matched = btn_parse_result(resp, &already, &faces, &ids,
+                                         name, sizeof(name));
 
           if (matched && !already) {
             outcome = 1;
@@ -875,21 +911,36 @@ static void doButtonCapture() {
             outcome = 2;
             strncpy(final_name, name, sizeof(final_name) - 1);
             break;   // DA DIEM DANH -> dung quet som
+          } else if (ids == 0) {
+            Serial.printf("[BTN] khung %d: server CHUA CO MAU MAT NAO - dang ky truoc\n",
+                          frames);
+          } else if (faces <= 0) {
+            Serial.printf("[BTN] khung %d: da gui OK nhung khong thay mat "
+                          "(phong trong / chup vat khong phai mat)\n", frames);
           } else {
-            Serial.printf("[BTN] khung %d: chua khop, quet tiep...\n", frames);
+            Serial.printf("[BTN] khung %d: thay %d mat nhung khong khop ai\n",
+                          frames, faces);
           }
         }
       }
     }
 
     if (fails >= BUTTON_MAX_FAILS) {
-      Serial.println("[BTN] loi mang lien tuc -> dung quet, 5 nhanh");
-      g_push_err = g_push_err + 1;
-      g_push_state = 0;
-      outcome = 5;
+      outcome = (last_fail == 4) ? 4 : 5;   // bao dung loai loi gap gan nhat
+      if (outcome == 5) {
+        Serial.println("[BTN] loi mang lien tuc -> dung quet, 5 nhanh");
+        g_push_err = g_push_err + 1;
+        g_push_state = 0;
+      } else {
+        Serial.println("[BTN] loi camera lien tuc -> dung quet, 4 nhanh");
+      }
       break;
     }
     delay(BUTTON_POST_GAP_MS);   // nhip quet ~2-3 khung/giay
+  }
+  // Het gio ma duoi co loi (chua du 3 lan de dung som) -> bao theo loi cuoi.
+  if (outcome == 0 && fails > 0 && (last_fail == 4 || last_fail == 5)) {
+    outcome = last_fail;
   }
 
   btnLed(false);   // tat flash TRUOC khi nhap LED bao ket qua
@@ -902,10 +953,13 @@ static void doButtonCapture() {
     Serial.printf("[BTN] %s da diem danh roi trong buoi nay (%d khung)\n",
                   final_name[0] ? final_name : "Hoc sinh", frames);
     btnBlink(2, 300, 200);            // 2 nhap vua
+  } else if (outcome == 4) {
+    Serial.println("[BTN] Khong chup duoc khung nao - kiem tra camera/nguon");
+    btnBlink(4, 120, 120);            // 4 nhap ngan
   } else if (outcome == 5) {
     btnBlink(5, 60, 60);              // 5 nhanh
   } else {
-    Serial.printf("[BTN] Het %d giay (%d khung): khong nhan dien duoc mat\n",
+    Serial.printf("[BTN] Het %d giay (%d khung): da gui OK nhung khong khop\n",
                   BUTTON_SCAN_SECONDS, frames);
     btnBlink(3, 120, 120);            // 3 nhap ngan
   }
