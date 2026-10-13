@@ -43,41 +43,41 @@ Không tải được model SFace? hệ thống tự chuyển sang **LBPH** cũ 
 ## 2. Luồng điểm danh (chạy thật)
 
 ```
+[Chế độ chờ (Idle) - KHÔNG truyền ảnh]
+ESP32-CAM và Server duy trì kết nối nhẹ:
+  ESP32 định kỳ gửi heartbeat (GET /api/esp32/heartbeat mỗi 3s)
+  Server nhận biết ESP32 đang hoạt động (Online), KHÔNG tốn băng thông truyền ảnh
+   │
+   ▼
 [Học sinh bấm nút trên ESP32-CAM]
    │  (BUTTON_PIN=13, kéo nội lên, kích mức thấp)
    ▼
-ESP32: khởi động camera → bật flash (giữ SÁNG suốt phiên quét = tín hiệu "đang quét")
+ESP32: tạo session_id duy nhất → truyền ảnh LIÊN TỤC trong 15 giây (~2–3 khung/giây)
    │
    ▼
-Quét tối đa 15 giây (~2–3 khung/giây):
-  mỗi khung → POST http://<ip-may>:5001/api/esp32/frame?capture=1 (multipart, field "file")
-    → server nhận diện khung đó → trả JSON ngay
-    → TRÚNG (matched ≥ 1) → DỪNG SỚM, không cần hết 15 giây
-   │
-   ▼
-Server: nhận diện → tìm trong DB → ghi điểm danh 1 dòng cho BUỔI hiện tại
-   │        (lớp 1 buổi/ngày → luôn buổi 1; lớp 2 buổi → theo khung giờ)
-   │        (khung lặp lại trong cùng buổi → server tự loại trùng, trả already:true)
+POST http://<ip-may>:5001/api/esp32/frame?capture=1&session_id=<sess_id>
+   │  → Server nhận diện từng khung hình gửi lên
+   │  → Điểm danh tối đa ĐÚNG 1 LẦN cho phiên 15s đó (loại bỏ trùng lặp trong đợt quét)
+   │  → ESP32 tiếp tục truyền đủ 15 giây để server có dữ liệu liên tục và hiển thị
    ▼
 Trả JSON: {ok, matched, already, full_name, class_name, session, session_name, results}
    │
    ▼
-ESP32: tắt flash → nháy LED báo kết quả → kết thúc phiên quét (camera vẫn init
-sẵn cho lần sau — driver không cho tắt/mở lại giữa chừng)
+ESP32 (sau khi hết 15s): tắt flash → nháy LED báo kết quả tổng hợp → trở về chế độ chờ (không truyền ảnh)
 ```
 
 ### Ý nghĩa nháy LED
 
 Tách 3 chặng (chụp → gửi → khớp) để đoán lỗi: **tích** = đã chụp + đã gửi
-(không nói gì về nhận diện) → **mẫu nháy** = kết quả.
+(không nói gì về nhận diện) → **mẫu nháy cuối 15s** = kết quả.
 
 | Mẫu nháy | Ý nghĩa |
 |---|---|
-| Flash **sáng liên tục** | Đang quét (tối đa 15 giây) — đứng yên trước camera |
-| **Chớp 80–100 ms sau mỗi khung** | Đã chụp + đã gửi tới server. Chĩa vào cái cốc cũng phải thấy tích — không thấy tích nào mà cuối 4/5 nháy = lỗi chụp/gửi, không phải lỗi nhận diện |
-| **1 nháy dài ~800 ms** | Điểm danh OK (`matched ≥ 1, already:false`) |
+| Flash **sáng liên tục** | Đang quét (trong 15 giây) — đứng yên trước camera |
+| **Chớp 80–100 ms sau mỗi khung** | Đã chụp + đã gửi tới server |
+| **1 nháy dài ~800 ms** | Điểm danh thành công (`matched ≥ 1, already:false`) |
 | **2 nháy vừa ~300 ms** | Đã nhận ra nhưng **đã điểm danh buổi này rồi** (`already:true`) |
-| **3 nháy ngắn ~120 ms** | Đã gửi OK nhưng không khớp — xem Serial: không thấy mặt / server chưa có mẫu nào / thấy mặt nhưng lạ |
+| **3 nháy ngắn ~120 ms** | Đã truyền đủ 15s nhưng không khớp ai (người lạ / chưa đăng ký mẫu / không thấy mặt) |
 | **4 nháy ngắn ~120 ms** | Không chụp được khung nào (lỗi camera/nguồn) |
 | **5 nháy nhanh ~60 ms** | Không gửi được (lỗi mạng / lỗi server / POST lỗi liên tiếp) |
 
@@ -89,6 +89,19 @@ Tách 3 chặng (chụp → gửi → khớp) để đoán lỗi: **tích** = đ
 - Khung giờ do admin cấu hình ở tab **Lớp & lịch học** (1 hoặc 2 buổi/ngày).
   Lớp 1 buổi → mọi giờ điểm danh đều tính buổi 1.
 - Preview / nhận diện thường (**không** qua `?capture=1`) **không** ghi điểm danh.
+
+### API của ESP32-CAM (mở cho thiết bị, không cần đăng nhập)
+
+| Endpoint | Khi nào dùng | Nội dung |
+|---|---|---|
+| `GET /api/esp32/heartbeat?heap=..&rssi=..&phase=idle` | Suốt thời gian **chờ** (mỗi 3s) | Chỉ giữ liên lạc — **không truyền ảnh**. Server trả `{status: ready\|scanning, is_scanning, registered_faces}`. Kèm `heap`/`rssi` để hiển thị sức khoẻ board; `phase=idle` báo server đóng phiên quét ngay khi vừa hết 15s. |
+| `POST /api/esp32/frame?capture=1&session_id=<mã>` | Trong **đợt 15s** sau khi nhấn nút | Ảnh JPEG liên tục (~2–3 khung/giây). Server nhận diện và **chỉ điểm danh 1 lần** cho mỗi `session_id`; các khung sau trả `already:true`. Thiếu `session_id` (firmware cũ) → server tự khoá theo khung 15s tính từ thời gian. |
+
+- Trạng thái thiết bị: `GET /api/esp32/status` (cần tài khoản developer) trả
+  `mode` (`idle` \| `scanning` \| `offline`), `online`, `is_scanning`,
+  `heartbeat_age`, `last_frame_age`, `heap`, `rssi`, `session_id`.
+- `online` = vừa có heartbeat (< 10s); `push_alive` = đang nhận **ảnh** (< 5s) —
+  hai cờ khác nhau để biết thiết bị đang *chờ* hay đang *truyền*.
 
 ## 3. Cấu hình trong file `.env`
 

@@ -248,9 +248,62 @@ hub = {"frame": None, "ts": 0.0, "source": "none"}
 out_lock = threading.Lock()
 output = {"jpeg": None, "ts": 0.0, "results": [], "source": "none", "age": 0.0}
 
-# Thống kê ESP32 PUSH (POST /api/esp32/frame). Không cần lock riêng vì chỉ đọc/ghi
-# số + thời gian (GIL đảm bảo nguyên tử cho gán đơn).
-esp32_state = {"last_ts": 0.0, "count": 0, "last_count": 0}
+# Thống kê ESP32: Heartbeat giữ kết nối khi nghỉ (không truyền ảnh) + Quét 15s khi nhấn nút
+esp32_state = {
+    "last_ts": 0.0,
+    "last_heartbeat": 0.0,
+    "last_scan_ts": 0.0,
+    "count": 0,
+    "last_count": 0,
+    "is_scanning": False,
+    "online": False,
+    "ip": None,
+    "heap": None,
+    "rssi": None,
+    "last_session_id": "",
+}
+
+# Ngưỡng thời gian cho 2 chế độ của ESP32-CAM (đơn vị giây):
+#  - Chế độ CHỜ: heartbeat nhẹ mỗi 3s, KHÔNG truyền ảnh -> online nếu ping < 10s.
+#  - Chế độ QUÉT 15s: truyền ảnh liên tục -> is_scanning nếu khung capture < 16s.
+ESP32_ONLINE_S = 10.0
+ESP32_SCAN_WINDOW_S = 16.0
+ESP32_PUSH_ALIVE_S = 5.0
+
+
+def esp32_refresh_state() -> dict:
+    """Suy ra cờ online / is_scanning từ timestamp và cập nhật esp32_state.
+
+    Cờ KHÔNG được ai set lại False thủ công (device ngừng gửi thì chẳng ai
+    báo) nên phải tính lại từ thời gian ở MỌI nơi đọc — tránh tồn đọng
+    "is_scanning=True" hay "online=True" sau khi ESP32 tắt/mất mạng.
+    """
+    now = time.time()
+    hb = float(esp32_state.get("last_heartbeat") or 0.0)
+    fr = float(esp32_state.get("last_ts") or 0.0)
+    sc = float(esp32_state.get("last_scan_ts") or 0.0)
+
+    # last_ts chỉ phản ánh khung HÌNH (POST /frame); heartbeat KHÔNG được ghi
+    # vào đây để cờ push_alive vẫn phân biệt được "đang push ảnh" với "chỉ ping".
+    online = bool((hb and now - hb < ESP32_ONLINE_S) or (fr and now - fr < ESP32_ONLINE_S))
+    scanning = bool(sc and now - sc < ESP32_SCAN_WINDOW_S)
+    esp32_state["online"] = online
+    esp32_state["is_scanning"] = scanning
+
+    return {
+        "online": online,
+        "is_scanning": scanning,
+        "push_alive": bool(fr and now - fr < ESP32_PUSH_ALIVE_S),
+        "push_count": esp32_state.get("count", 0),
+        "push_last_faces": esp32_state.get("last_count", 0),
+        "heartbeat_age": round(now - hb, 2) if hb else None,
+        "frame_age": round(now - fr, 2) if fr else None,
+        "scan_age": round(now - sc, 2) if sc else None,
+        "session_id": esp32_state.get("last_session_id") or "",
+        "heap": esp32_state.get("heap"),
+        "rssi": esp32_state.get("rssi"),
+        "ip": esp32_state.get("ip"),
+    }
 
 
 def set_frame(frame, source: str):
@@ -265,16 +318,20 @@ def get_hub():
         return hub["frame"], hub["ts"], hub["source"]
 
 
-def placeholder_frame(text="Đang chờ tín hiệu camera..."):
+def placeholder_frame(title="Đang chờ tín hiệu camera...", subtitle=""):
     img = np.zeros((480, 640, 3), dtype=np.uint8)
     img[:] = (35, 35, 40)
-    w, _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 2)[0]
-    draw_text(img, text, ((640 - w) // 2, 225), (200, 200, 200), bg=None)
+    w, _ = cv2.getTextSize(title, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+    draw_text(img, title, (max(20, (640 - w) // 2), 210), (220, 220, 220), bg=None)
+    if subtitle:
+        w2, _ = cv2.getTextSize(subtitle, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)[0]
+        draw_text(img, subtitle, (max(20, (640 - w2) // 2), 250), (160, 200, 160), bg=None)
     ok, buf = cv2.imencode(".jpg", img)
     return buf.tobytes() if ok else b""
 
 
-PLACEHOLDER = placeholder_frame()
+PLACEHOLDER = placeholder_frame("Chưa có kết nối ESP32-CAM", "Đang chờ thiết bị kết nối...")
+PLACEHOLDER_STANDBY = placeholder_frame("ESP32-CAM: Đang hoạt động (Online)", "Chế độ chờ: Không truyền ảnh · Nhấn nút để quét 15s")
 
 
 def reset_identity_state():
@@ -296,15 +353,54 @@ def _gallery_ids() -> int:
     return len(m.gallery) + len(m.gallery_gray)
 
 
-def record_results(results):
-    """Ghi điểm danh cho các kết quả khớp. Chỉ dùng khi CHẤM ĐIỂM DANH (capture).
+scan_sessions_lock = threading.Lock()
+scan_sessions = {}
 
-    Trả về dict kết quả đầu tiên để phản hồi cho ESP32:
-      {'matched', 'already', 'full_name', 'class_name', 'session', 'session_name',
-       'ids' (số người đã đăng ký mẫu)}
+
+def _cleanup_scan_sessions():
+    now = time.time()
+    with scan_sessions_lock:
+        to_del = [sid for sid, data in scan_sessions.items() if now - data.get("created_at", 0) > 60.0]
+        for sid in to_del:
+            del scan_sessions[sid]
+
+
+def record_results(results, session_id=None):
+    """Ghi điểm danh cho các kết quả khớp trong phiên quét 15s.
+
+    Quy tắc nghiệp vụ:
+      - Khi kết nối bình thường: Server và ESP32-CAM chỉ giữ liên lạc (heartbeat) để biết nhau đang hoạt động,
+        hoàn toàn KHÔNG truyền hình ảnh.
+      - Khi nhấn nút trên ESP32-CAM: Thiết bị truyền ảnh liên tục trong 15s đến server.
+      - Trong 1 lần của 15s đó (cùng session_id): Server chỉ ghi nhận điểm danh 1 LẦN DUY NHẤT
+        cho học sinh đầu tiên khớp nhận diện, không ghi lặp lại nhiều lần dù nhận nhiều khung ảnh.
     """
-    summary = {"matched": 0, "already": False, "full_name": "", "class_name": "",
-               "session": 0, "session_name": "", "ids": _gallery_ids()}
+    _cleanup_scan_sessions()
+
+    # Kiểm tra xem phiên 15s này đã từng ghi nhận điểm danh chưa
+    if session_id:
+        with scan_sessions_lock:
+            cached = scan_sessions.get(session_id)
+            if cached and cached.get("matched", 0) > 0:
+                res = dict(cached)
+                # Khung lặp trong CÙNG phiên 15s: đã chốt điểm danh rồi ->
+                # báo already=True (nháy LED 2 nháy trên ESP32), không ghi DB.
+                res["already"] = True
+                res["session_recorded"] = True
+                return res
+
+    summary = {
+        "matched": 0,
+        "already": False,
+        "full_name": "",
+        "class_name": "",
+        "session": 0,
+        "session_name": "",
+        "ids": _gallery_ids(),
+        "session_id": session_id or "",
+        "session_recorded": False,
+    }
+
     for r in results:
         if not r.get("match"):
             continue
@@ -326,7 +422,13 @@ def record_results(results):
                 class_name=r.get("class_name") or "",
                 session=int(info.get("session") or 0),
                 session_name=db.SESSION_NAMES.get(int(info.get("session") or 0), ""),
+                session_recorded=True,
             )
+            # Khóa kết quả cho phiên 15s này
+            if session_id:
+                with scan_sessions_lock:
+                    scan_sessions[session_id] = {**summary, "created_at": time.time()}
+            break  # Đã chốt 1 lần cho lượt 15s này
     return summary
 
 
@@ -515,9 +617,9 @@ def _valid_date(value, fallback=None):
 
 # ================================================================= CỔNG DEBUG
 # Chỉ TÀI KHOẢN DEVELOPER mới xem/điều khiển được trang camera (preview là công
-# cụ debug, không phải luồng điểm danh). Ngoại lệ: /api/ping (sức khoẻ) và
-# /api/esp32/frame (ESP32 gửi ảnh — thiết bị không có phiên đăng nhập).
-_OPEN_CAM_PATHS = ("/api/ping", "/api/esp32/frame")
+# cụ debug, không phải luồng điểm danh). Ngoại lệ: /api/ping (sức khoẻ),
+# /api/esp32/heartbeat (kiểm tra hoạt động), /api/esp32/frame (ESP32 gửi ảnh 15s).
+_OPEN_CAM_PATHS = ("/api/ping", "/api/esp32/frame", "/api/esp32/heartbeat")
 
 
 @cam_app.before_request
@@ -547,8 +649,13 @@ def video_feed():
         while True:
             with out_lock:
                 jpeg = output["jpeg"]
-            if jpeg is None:
-                jpeg = PLACEHOLDER
+                fresh = time.time() - output["ts"] < 3.0 if output["ts"] else False
+            # Trong lúc quét 15s thì hub có frame mới liên tục -> fresh=true.
+            # Chỉ cần phân biệt 2 trạng thái KHÔNG có frame: online (chờ,
+            # không truyền ảnh) vs offline (chưa kết nối).
+            esp_alive = esp32_refresh_state()["online"]
+            if not fresh or jpeg is None:
+                jpeg = PLACEHOLDER_STANDBY if esp_alive else PLACEHOLDER
             if jpeg is not last:
                 yield (
                     b"--frame\r\n"
@@ -565,6 +672,50 @@ def video_feed():
     resp.headers["Pragma"] = "no-cache"
     resp.headers["X-Accel-Buffering"] = "no"
     return resp
+
+
+@cam_app.route("/api/esp32/heartbeat", methods=["GET", "POST"])
+def api_esp32_heartbeat():
+    """Heartbeat định kỳ từ ESP32-CAM:
+    - Ở chế độ chờ: ESP32-CAM và Server chỉ kết nối kiểm tra hoạt động của nhau.
+    - Hoàn toàn KHÔNG truyền hình ảnh trong lúc này.
+    - Có thể kèm ?heap=...&rssi=... để server hiển thị tình trạng board.
+    """
+    now = time.time()
+    esp32_state["last_heartbeat"] = now
+    # KHÔNG ghi last_ts ở đây: last_ts là "khung HÌNH vừa nhận" (POST /frame).
+    # Nếu heartbeat cũng ghi thì cờ push_alive sẽ luôn đúng và UI mất phân biệt
+    # "đang truyền ảnh" với "chỉ đang giữ kết nối".
+    if request.remote_addr:
+        esp32_state["ip"] = request.remote_addr
+
+    data = request.get_json(silent=True) or request.args.to_dict()
+    if data:
+        for key in ("heap", "rssi"):
+            if key in data:
+                try:
+                    esp32_state[key] = int(str(data[key]).strip())
+                except (TypeError, ValueError):
+                    esp32_state[key] = None
+        # ESP32 gửi ?phase=idle ngay khi kết thúc đợt 15s -> đóng phiên quét
+        # ngay lập tức thay vì đợi hết cửa sổ 16s sau khung ảnh cuối.
+        if str(data.get("phase", "")).strip().lower() == "idle":
+            esp32_state["last_scan_ts"] = 0.0
+
+    st = esp32_refresh_state()
+
+    return jsonify({
+        "ok": True,
+        "server": "active",
+        "status": "scanning" if st["is_scanning"] else "ready",
+        "server_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "registered_faces": _gallery_ids(),
+        "is_scanning": st["is_scanning"],
+        "scan_age": st["scan_age"],
+        # Server tự báo cho ESP32 biết nó có đang trong đợt 15s không
+        # (phòng trường hợp ESP32 bỏ lỡ JSON của khung POST cuối).
+        "last_session_id": st["session_id"],
+    })
 
 
 @cam_app.get("/api/ping")
@@ -705,8 +856,7 @@ def status():
         src = output["source"]
         age = output["age"]
         fresh = time.time() - output["ts"] < 3.0 if output["ts"] else False
-    now = time.time()
-    esp_last = esp32_state.get("last_ts", 0.0)
+    esp = esp32_refresh_state()
     return jsonify(
         {
             "ok": True,
@@ -721,9 +871,14 @@ def status():
             "faces": len(results),
             "matched": sum(1 for r in results if r.get("match")),
             "esp32": {
-                "push_alive": bool(esp_last and now - esp_last < 5.0),
-                "push_last_age": round(now - esp_last, 2) if esp_last else None,
-                "push_count": esp32_state.get("count", 0),
+                "online": esp["online"],
+                "is_scanning": esp["is_scanning"],
+                "push_alive": esp["push_alive"],
+                "push_last_age": esp["frame_age"],
+                "push_count": esp["push_count"],
+                "heartbeat_age": esp["heartbeat_age"],
+                "heap": esp["heap"],
+                "rssi": esp["rssi"],
             },
         }
     )
@@ -922,7 +1077,8 @@ def api_recognize():
     results, _frame = engine.process(images[0], draw=False, track=False)
     resp = {"ok": True, "results": results, "count": len(results)}
     if request.args.get("capture") in ("1", "true", "yes"):
-        resp.update(record_results(results))
+        session_id = request.args.get("session_id", "").strip()
+        resp.update(record_results(results, session_id=session_id))
     return jsonify(resp)
 
 
@@ -931,16 +1087,10 @@ def api_recognize():
 def api_esp32_frame():
     """Nhận khung hình từ ESP32-CAM.
 
-    * ?capture=1 (CHẾ ĐỘ NÚT NHẤN — mặc định của firmware mới): nhận diện đồng
-      bộ và GHI ĐIỂM DANH cho buổi hiện tại, trả JSON kèm kết quả điểm danh
-      ('matched', 'already', 'full_name', 'session'...) để ESP32 nháy đèn báo.
+    * ?capture=1&session_id=...: ESP32-CAM truyền ảnh liên tục trong 15s sau khi nhấn nút.
+      Server nhận diện và ghi nhận điểm danh tối đa 1 LẦN cho phiên 15s đó.
     * POST liên tục (không capture): chỉ cập nhật hub cho preview, trả kết quả
       CACHED của process_loop (5ms) — không inference, không điểm danh.
-
-    Hỗ trợ 3 cách gửi của firmware (xem PUSH_MODE_MJPEG):
-      1. image/jpeg / application/octet-stream : body = 1 ảnh JPEG thô.
-      2. multipart/form-data, field "file"     : PUSH_MODE_MJPEG=0 (khuyên dùng).
-      3. multipart/x-mixed-replace             : PUSH_MODE_MJPEG=1 (lũy MJPEG).
     """
     ctype = (request.content_type or "").lower()
     img = None
@@ -970,11 +1120,21 @@ def api_esp32_frame():
     set_frame(img, "esp32")
     esp32_state["last_ts"] = now
     esp32_state["count"] += 1
-    # Nhớ IP ESP32 (để panel cài đặt suy ra địa chỉ web :80 khi chỉ dùng PUSH).
+
+    want_capture = request.args.get("capture") in ("1", "true", "yes")
+    session_id = (request.args.get("session_id") or "").strip()
+    if want_capture:
+        # Chỉ ghi timestamp: cờ is_scanning được SUY RA từ last_scan_ts
+        # (xem esp32_refresh_state) để tự về False khi thiết bị ngừng truyền.
+        esp32_state["last_scan_ts"] = now
+        esp32_state["last_session_id"] = session_id
+        if not session_id:
+            # Firmware cũ không gửi session_id -> vẫn phải chốt 1 lần / đợt 15s:
+            # dùng khung 15s tự sinh theo thời gian làm khoá phiên tạm.
+            session_id = f"auto_{int(now // ESP32_SCAN_WINDOW_S)}"
     if request.remote_addr:
         esp32_state["ip"] = request.remote_addr
 
-    want_capture = request.args.get("capture") in ("1", "true", "yes")
     mode = (request.args.get("mode") or request.args.get("fast") or "").strip().lower()
     want_sync = request.args.get("sync") == "1" or mode in ("sync", "0")
     want_fast = request.args.get("fast") == "1" or mode in ("fast", "1")
@@ -990,35 +1150,44 @@ def api_esp32_frame():
                         "full_name": "", "class_name": "", "session": 0,
                         "session_name": "", "ids": _gallery_ids()})
 
-    # Nhận diện đồng bộ cho đúng ảnh vừa nhận; capture=1 -> ghi điểm danh.
+    # Nhận diện đồng bộ cho đúng ảnh vừa nhận; capture=1 -> ghi điểm danh 1 lần trong phiên 15s.
     results, _annotated = engine.process(img, draw=False, track=False)
     esp32_state["last_count"] = len(results)
     resp = {"ok": True, "results": results, "count": len(results), "cached": False}
     if want_capture:
-        resp.update(record_results(results))
+        resp.update(record_results(results, session_id=session_id))
     return jsonify(resp)
 
 
 @cam_app.get("/api/esp32/status")
 def api_esp32_status():
-    """Trạng thái nguồn ESP32: lần PUSH cuối, tổng khung, nguồn PULL hiện tại."""
+    """Trạng thái nguồn ESP32: online, heartbeat, phiên quét 15s, tổng khung."""
     now = time.time()
-    last = esp32_state.get("last_ts", 0.0)
+    st = esp32_refresh_state()
+
     with hub_lock:
         _f, hub_ts, hub_src = hub["frame"], hub["ts"], hub["source"]
     return jsonify({
         "ok": True,
-        "push_last_age": round(now - last, 2) if last else None,
-        "push_alive": bool(last and now - last < 5.0),
-        "push_count": esp32_state.get("count", 0),
-        "push_last_faces": esp32_state.get("last_count", 0),
+        "mode": "scanning" if st["is_scanning"] else ("idle" if st["online"] else "offline"),
+        "online": st["online"],
+        "is_scanning": st["is_scanning"],
+        "session_id": st["session_id"],
+        "scan_age": st["scan_age"],
+        "last_heartbeat_age": st["heartbeat_age"],
+        "last_frame_age": st["frame_age"],
+        # push_alive nghĩa cũ = "đang nhận ẢNH" (khác online = "vừa có heartbeat")
+        "push_alive": st["push_alive"],
+        "push_count": st["push_count"],
+        "push_last_faces": st["push_last_faces"],
+        "heap": st["heap"],
+        "rssi": st["rssi"],
         "hub_source": hub_src,
         "hub_age": round(now - hub_ts, 2) if hub_ts else None,
         "stream_url": SETTINGS.get("stream_url", ""),
-        "esp32_ip": esp32_state.get("ip"),
+        "esp32_ip": st["ip"],
         "cam_base": esp32_base_url(),
-        "hint_capture": "Nút nhấn ESP32 -> POST /api/esp32/frame?capture=1",
-        "hint_pull": "PULL (debug): STREAM_URL=http://<ip-esp32>:81/stream",
+        "hint": "Chế độ chờ: Chỉ heartbeat kết nối kiểm tra hoạt động (không truyền ảnh). Nhấn nút: Truyền ảnh liên tục 15s để nhận diện."
     })
 
 
@@ -1230,7 +1399,7 @@ def system_info():
         fresh = time.time() - output["ts"] < 3.0 if output["ts"] else False
         age = output["age"]
         src = output["source"] if fresh else "none"
-    esp_last = esp32_state.get("last_ts", 0.0)
+    esp = esp32_refresh_state()
     db_path = Path(db.DB_PATH)
     info = engine.info()
     return {
@@ -1250,10 +1419,17 @@ def system_info():
             "log_rows": len(db.recent_log(500)),
         },
         "esp32": {
-            "push_alive": bool(esp_last and now - esp_last < 5.0),
-            "push_last_age": round(now - esp_last, 2) if esp_last else None,
-            "push_count": esp32_state.get("count", 0),
-            "ip": esp32_state.get("ip"),
+            "online": esp["online"],
+            "is_scanning": esp["is_scanning"],
+            "mode": "scanning" if esp["is_scanning"] else ("idle" if esp["online"] else "offline"),
+            "session_id": esp["session_id"],
+            "heartbeat_age": esp["heartbeat_age"],
+            "push_alive": esp["push_alive"],
+            "push_last_age": esp["frame_age"],
+            "push_count": esp["push_count"],
+            "heap": esp["heap"],
+            "rssi": esp["rssi"],
+            "ip": esp["ip"],
         },
         "db": {
             "path": str(db_path),

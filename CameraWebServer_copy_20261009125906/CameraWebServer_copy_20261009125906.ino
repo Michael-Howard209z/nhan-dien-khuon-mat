@@ -17,25 +17,27 @@
 //       - Server chap nhan: image/jpeg tho, multipart field "file" (che do 0),
 //         va ca cum MJPEG (che do 1). NHUNG voi Flask nen de MODE = 0 vi POST
 //         MJPEG chunked giu keep-alive lam treo worker Flask.
-//
 //   [C] BUTTON - CHE DO NUT NHAN (mac dinh, moi):  <-- khuyen dung
-//       - BUTTON_ENABLE = 1: camera init 1 LAN duy nhat luc can dau tien roi
-//         giu nguyen suot uptime (KHONG deinit: driver hong khi init lai).
-//         Nhan nut GPIO13 -> quet lien tuc toi da 15 giay (flash sang, POST
-//         tung khung ?capture=1, trung la dung som) -> tat flash ->
-//         LED phep biet ket qua. Sensor chi chay that khi quet hoac stream.
-//       - Khong co PUSH lien tuc, khong stream noi bo tu chay -> chip khong bi
-//         "doi" boi luong khung lien tuc (nguyen nhan treo truoc day).
-//       - Web :80 van chay de dev cau hinh cam (/control, /flash, /capture,
-//         /live?state=0|1); stream :81 chi chay khi co nguoi mo trinh duyet.
-//
-//  Ghi chu nhan dien (quan trong):
-//   - Anh ESP32 nho (QVGA 320x240) -> mat xa de < MIN_FACE_SIZE (mac dinh 44)
-//     va bi bo qua. Nen de VGA 640x480 tro len (xem s->set_framesize ben duoi)
-//     va tren server co the ha MIN_FACE_SIZE xuong 24-32 + tang DETECT_SCORE.
-//   - Che do nut nhan chi chup 1 anh moi lan nhan -> khong can PUSH_FPS.
-// ============================================================================
+//       - Khi o che do cho (idle): ESP32-CAM va server KHONG truyen hinh anh.
+//         Chi gui heartbeat nhe (GET /api/esp32/heartbeat) moi 3s de biet nhau
+//         dang hoat dong (online).
+//       - Khi nhan nut (GPIO13): ESP32-CAM truyen hinh anh LIEN TUC trong 15s
+//         den server de nhan dien khuon mat.
+//         ("truyen lien tuc" = lay tung khung tu camera roi POST len server
+//         ~2-3 lan/giay. ESP32-CAM khong co "ong truyen thang" sensor -> server;
+//         POST MJPEG lien tuc da thu truoc do va bi tat vi treo worker Flask.)
+//       - Camera duoc init NGAY LUC NHAN NUT (khong init tai boot), dung cau
+//         hinh da chung minh chay duoc: VGA / quality 12 / fb_count 1 /
+//         GRAB_WHEN_EMPTY (giong ban CamButtonStrip). KHONG bat log driver
+//         camera VERBOSE (truoc do gay "cam_hal: FB-OVF" + fb_get NULL vi
+//         nghet UART 115200).
+//       - Server thuc hien nhan dien va ghi nhan diem danh DUNG 1 LAN trong
+//         dot 15s do (loai bo trung lap giua cac khung hinh trong cung phien).
+//       - Ket thuc 15s: den LED bao ket qua (1 nhap dai = diem danh OK,
+//         2 nhap vua = da diem danh, 3 nhap ngan = khong khop, 4 = loi cam, 5 = loi mang),
+//         sau do tro ve che do cho khong truyen anh.
 #include "esp_camera.h"
+#include "esp_log.h"             // esp_log_level_set: mo log driver camera khi chan doan fb NULL
 #include <WiFi.h>
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
@@ -89,9 +91,9 @@ static DNSServer dnsServer;
 // ==================================================================
 //  CHE DO NUT NHAN (che do chinh cua san pham)  -->  sua o day
 // ==================================================================
-#define BUTTON_ENABLE     1       // 1 = che do nut nhan (cam OFF khi nghi, nhan nut = quet lien tuc + POST diem danh)
+#define BUTTON_ENABLE     1       // 1 = che do nut nhan (cam OFF khi nghi, nhan nut = truyen anh 15s)
                                   // 0 = quay lai che do cu (PULL/PUSH lien tuc, cam luon bat)
-#define FW_VERSION "2026-10-11-vga-scan"  // in ra Serial luc boot de biet board dang chay ban nao
+#define FW_VERSION "2026-10-12-fbovf-logfix"  // in ra Serial luc boot de biet board dang chay ban nao
 #define BUTTON_PIN       13     // GPIO13, INPUT_PULLUP: nut nhan noi GPIO13 -> GND, nhan xuong = muc THAP (active LOW)
 //  Sao khong dung cac chan khac:
 //   - GPIO12 (MTDI): strapping pin. Nut keo LOW luc boot se doi thanh suc
@@ -107,15 +109,20 @@ static DNSServer dnsServer;
                                   //  nay vi no nam rieng trong file .ino)
 #define BUTTON_DEBOUNCE_MS 30    // chong rung: chi tin nhan khi muc on dinh >= 30ms
 #define BUTTON_COOLDOWN_MS 800   // bo qua nhan moi trong 800ms sau lan truoc (tran nhan lung)
-#define BUTTON_SCAN_SECONDS 15   // nhan nut -> quet lien tuc TOI DA 15 giay (trung mat la dung som)
+#define BUTTON_SCAN_SECONDS 15   // nhan nut -> truyen anh lien tuc 15 giay de nhan dien (ghi nhan 1 lan)
 #define BUTTON_POST_GAP_MS 300   // nghi giua 2 khung POST lien tiep (~2-3 khung/giay)
-#define BUTTON_MAX_FAILS 3       // POST loi LIEN TIEP qua muc nay -> bao 5 nhap, dung quet
-#define BUTTON_SCAN_FLASH 0      // 1 = giu flash sang suot luc quet (sang, ro mat).
-                                 // 0 = tat flash khi quet: dung khi NGUON YEU (flash+WiFi+camera
-                                 //     cung luc gay sut ap -> sensor treo, fb NULL). Can du anh
-                                 //     sang moi truong neu tat flash.
-                                 // (Dang de 0 de chan doan: neu quet chay duoc khi tat flash
-                                 //  thi 100% la nguon yeu - flash la giot nuoc tran ly.)
+#define BUTTON_MAX_FAILS 3       // POST loi LIEN TIEP qua muc nay -> dung quet
+#define BUTTON_SCAN_FLASH 0      // 1 = giu flash sang suot luc quet; 0 = tat flash (an toan nguon yeu)
+#define HEARTBEAT_INTERVAL_MS 3000 // Gui heartbeat nhe (khong truyen anh) moi 3 giay khi cho
+
+// ---- CAU HINH DRIVER CAMERA (DUNG HET CHO BAN MINIMAL DA CHAY DUOC) ----
+//  CamButtonStrip (VGA + q12 + fb_count 1 + GRAB_WHEN_EMPTY, khong log verbose)
+//  chay hoan toan tot tren CUNG board nay. Firmware chinh truoc do dung
+//  fb_count 2 + GRAB_LATEST + log VERBOSE -> "cam_hal: FB-OVF" + fb_get NULL
+//  (nguyen nhan: log driver camera nghet UART 115200 -> task camera khong tra
+//  buffer kip). Ve lai dung cau hinh da chung minh.
+#define CAM_FB_COUNT      1     // 1 buffer: du khi chi 1 nguoi doc (chup nut) moi luc
+#define CAM_GRAB_LATEST   0     // 0 = CAMERA_GRAB_WHEN_EMPTY (giong minimal da chay duoc)
 
 // BUTTON_ENABLE = 1 -> che do nhan POST 1 anh moi lan nhan nut, khong can
 // PUSH lien tuc nua. Neu nguoi dung de PUSH_ENABLE = 1 thi cung tu tat.
@@ -137,12 +144,13 @@ void startCameraServer();
 void setupLedFlash();
 bool camWake();          // bat camera (init lai neu can) -> true = OK
 void camSleep();  // GIU NGUYEN camera (khong deinit - xem dinh nghia duoi)
+static int camWarmup();  // bo 3 khung dau sau init + in ket qua ra Serial (doan)
 #if defined(LED_GPIO_NUM)
 extern int led_duty;     // do sang flash, dinh nghia trong app_httpd.cpp (dong bo UI web)
 #endif
 #if BUTTON_ENABLE
 static void buttonPoll();                          // poll nut + xu ly su kien nhan
-static void doButtonCapture();                     // quet lien tuc toi da 15 giay + POST + LED phep
+static void doButtonCapture();                     // truyen anh lien tuc 15 giay + POST + LED phep
 static bool buttonPressedEvent();                  // debounce + xuong canh
 static void btnBlink(int count, int on_ms, int off_ms);
 static void btnLed(bool on);
@@ -151,14 +159,18 @@ static int push_read_response_body(Client *c, char *buf, size_t buf_sz, int time
 static int btn_parse_result(const char *json, int *already, int *faces, int *ids,
                             char *out_name, size_t name_sz);
 #endif
+static void heartbeatPoll();                       // duy tri ket noi (khong truyen anh) khi cho
 
 static void serialPoll();   // lenh Serial (/url, /help): doi URL server khong can nap lai
 
-// ---------------- Trang thai push (doc tu app_httpd.cpp) ----------------
+// ---------------- Trang thai push va heartbeat ----------------
 volatile int g_push_state = 0;      // 0 = chua ket noi/dang lai, 1 = dang day
 volatile uint32_t g_push_ok = 0;    // so khung gui thanh cong
 volatile uint32_t g_push_err = 0;   // so khung loi
 const char *g_push_url = PUSH_URL;   // se tro sang cfg.push_url sau cfg_load() trong setup()
+volatile bool g_server_online = false; // true = server Python dang phan hoi heartbeat (online)
+volatile bool g_is_scanning = false;   // true = dang trong dot truyen anh 15 giay
+static uint32_t g_last_heartbeat_ms = 0;
 
 // ---------------- Trang thai camera (doc tu app_httpd.cpp) ----------------
 volatile bool g_cam_on = false;         // true = camera da init (che do nguoc: OFF khi nghi)
@@ -274,16 +286,17 @@ static const char PUSH_FORM_HEAD[] =
 static const char PUSH_FORM_TAIL[] = "\r\n--" PUSH_BOUNDARY "--\r\n";
 
 // POST 1 anh dinh dang multipart/form-data (Connection: close)
-static bool push_post_frame(Client *c, const uint8_t *jpg, size_t len) {
+static bool push_post_frame(Client *c, const uint8_t *jpg, size_t len, const char *custom_path = NULL) {
   size_t body_len = (sizeof(PUSH_FORM_HEAD) - 1) + len + (sizeof(PUSH_FORM_TAIL) - 1);
-  char head[224];
+  const char *p_path = custom_path ? custom_path : push_path.c_str();
+  char head[256];
   int n = snprintf(head, sizeof(head),
                    "POST %s HTTP/1.1\r\n"
                    "Host: %s\r\n"
                    "Content-Type: multipart/form-data; boundary=" PUSH_BOUNDARY "\r\n"
                    "Content-Length: %u\r\n"
                    "Connection: close\r\n\r\n",
-                   push_path.c_str(), push_host.c_str(), (unsigned)body_len);
+                   p_path, push_host.c_str(), (unsigned)body_len);
   if (n <= 0) return false;
   if (c->write((const uint8_t *)head, n) != (size_t)n) return false;
   if (c->write((const uint8_t *)PUSH_FORM_HEAD, sizeof(PUSH_FORM_HEAD) - 1) != sizeof(PUSH_FORM_HEAD) - 1) return false;
@@ -597,26 +610,25 @@ static bool camWakeInit() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  // Cau hinh giong ban minimal da chung minh chay on dinh tren OV5640:
-  // VGA + quality 12 + GRAB_LATEST. RIENG fb_count=2 (khac minimal): phai du
-  // cho 2 consumer cung luc (vong quet nut + tab :81 stream mo nen) - fb_count=1
-  // se treo khi 2 ben giu 1 buffer (fb NULL 4s). Trung lap thi server tu loai
-  // (already) nen khung trung khong hai gi.
+  // Cau hinh VGA + quality 12 da chung minh chay duoc tren OV5640 (ban minimal).
+  // fb_count / grab_mode lay tu macro tren dau file: 1 + WHEN_EMPTY (giong ban
+  // minimal da chay duoc; khong dung 2/LATEST + log verbose -> FB-OVF).
   config.frame_size = FRAMESIZE_VGA;
   config.pixel_format = PIXFORMAT_JPEG;     // for streaming
   //config.pixel_format = PIXFORMAT_RGB565; // for face detection/recognition
-  config.grab_mode = CAMERA_GRAB_LATEST;    // khong block khi tranh buffer -> it treo
+  config.grab_mode = CAM_GRAB_LATEST ? CAMERA_GRAB_LATEST : CAMERA_GRAB_WHEN_EMPTY;
   config.fb_location = CAMERA_FB_IN_PSRAM;
   config.jpeg_quality = 12;                  // 12=net/khoe, 15=can bang, 20-25=nhe/muot (0..63, so cang lon cang nhe)
-  config.fb_count = 2;                       // 2 buffer: nut quet + :81 stream moi ben 1 cai
+  config.fb_count = CAM_FB_COUNT;
 
   // if PSRAM IC present, init with UXGA resolution and higher JPEG quality
   //                      for larger pre-allocated frame buffer.
   if (config.pixel_format == PIXFORMAT_JPEG) {
     if (psramFound()) {
       config.jpeg_quality = 12;
-      config.fb_count = 2;
-      config.grab_mode = CAMERA_GRAB_LATEST;
+      // Van dung macro (mac dinh 1 + WHEN_EMPTY, giong ban minimal da chay duoc).
+      config.fb_count = CAM_FB_COUNT;
+      config.grab_mode = CAM_GRAB_LATEST ? CAMERA_GRAB_LATEST : CAMERA_GRAB_WHEN_EMPTY;
       config.fb_location = CAMERA_FB_IN_PSRAM;
     } else {
       // Limit the frame size when PSRAM is not available
@@ -639,6 +651,10 @@ static bool camWakeInit() {
 #endif
 
   // camera init
+  Serial.printf("[CAM] init: VGA/q12/fb_count=%d/grab=%s/PSRAM=%s\n",
+                (int)config.fb_count,
+                (config.grab_mode == CAMERA_GRAB_LATEST) ? "LATEST" : "WHEN_EMPTY",
+                psramFound() ? "co" : "KHONG");
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x\n", err);
@@ -699,6 +715,33 @@ bool camWake() {
 // Muon tat hoan toan -> reset board. API giu nguyen de /live va loop khong doi.
 void camSleep() {
   return;   // co y khong lam gi
+}
+
+// ============================================================================
+//  NONG MAY: sau khi init, bo 3 khung dau tien va IN ket qua ra Serial.
+//  Van de dang gap: esp_camera_init() OK (doc duoc PID sensor) NHUNG
+//  esp_camera_fb_get() luon tra NULL -> khong co khung nao de gui len server.
+//  Ham nay phan biet ro 2 truong hop:
+//    -3/3 NULL -> sensor KHONG XUAT FRAME (XCLK/LEDC bi chiem, nguon yeu,
+//                 loi cap nguon PWDN) -> phai sua phan cung, khong phai loi luong diem danh.
+//    - co frame -> camera tot, loi o noi khac.
+static int camWarmup() {
+  int ok = 0;
+  for (int i = 0; i < 3; i++) {
+    uint32_t t0 = millis();
+    camera_fb_t *fb = esp_camera_fb_get();
+    uint32_t dt = millis() - t0;
+    bool got = (fb != NULL);
+    if (got) {
+      ok++;
+      esp_camera_fb_return(fb);
+    }
+    Serial.printf("[CAM] nong may khung %d: %s (doi %lu ms)\n", i + 1,
+                  got ? "OK" : "NULL - khong co frame", (unsigned long)dt);
+    delay(60);
+  }
+  Serial.printf("[CAM] nong may xong: %d/3 khung co frame\n", ok);
+  return ok;
 }
 
 // ============================================================================
@@ -767,20 +810,94 @@ static void cam_sleep_request() {
   g_sleep_req = true;
 }
 
-// Mot lan nhan nut = 1 phien quet: day cam -> flash tuy che do -> lap:
-// chup -> POST ?capture=1 -> doc JSON -> LED phep. Phan hoi tach 3 chang:
-//   CHUP (4 nhap neu khong co khung) / GUI (tich 1 nhap + 5 nhap neu loi mang)
-//   / KHOP (1 dai OK, 2 vua da diem danh, 3 ngan khong khop).
-// Moi khung deu kem ?capture=1 nen server tu loai trung theo buoi (already).
+// ============================================================================
+//  HEARTBEAT: duy tri ket noi voi server Python ma KHONG truyen hinh anh
+//  Chi gui 1 HTTP GET nhe (~100 byte text) moi 3s de biet server con song.
+// ============================================================================
+static void heartbeatPoll() {
+  if (WiFi.status() != WL_CONNECTED || g_is_scanning) return;
+  uint32_t now = millis();
+  if (g_last_heartbeat_ms != 0 && (now - g_last_heartbeat_ms) < HEARTBEAT_INTERVAL_MS) {
+    return;
+  }
+  g_last_heartbeat_ms = now;
+
+  push_parse_url();
+  Client *c = push_client();
+  if (!push_connect(c)) {
+    if (g_server_online) {
+      Serial.printf("[HEARTBEAT] Mat ket noi server %s:%u\n", push_host.c_str(), push_port);
+    }
+    g_server_online = false;
+    c->stop();
+    return;
+  }
+
+  // Kem thong so board (heap con lai, do manh WiFi) de server hien thi trien
+  // ve va chua duoc trang thai "ESP32 dang cho" (nham prompt: 2 ben chi biet
+  // nhau dang hoat dong, khong truyen anh).
+  char req[224];
+  int n = snprintf(req, sizeof(req),
+                   "GET /api/esp32/heartbeat?heap=%u&rssi=%d&phase=idle HTTP/1.1\r\n"
+                   "Host: %s:%u\r\n"
+                   "User-Agent: ESP32-CAM\r\n"
+                   "Connection: close\r\n\r\n",
+                   (unsigned)ESP.getFreeHeap(), (int)WiFi.RSSI(),
+                   push_host.c_str(), push_port);
+  if (n > 0) {
+    c->write((const uint8_t *)req, n);
+  }
+
+  // Doc status line voi timeout 1500ms
+  char status_line[48];
+  int i = 0;
+  uint32_t t0 = millis();
+  while (millis() - t0 < 1500) {
+    while (c->available()) {
+      char ch = (char)c->read();
+      if (i < (int)sizeof(status_line) - 1) status_line[i++] = ch;
+      if (ch == '\n') goto have_hb_line;
+    }
+    if (!c->connected()) break;
+    delay(1);
+  }
+have_hb_line:
+  status_line[i] = 0;
+  char *sp = strchr(status_line, ' ');
+  int code = sp ? atoi(sp + 1) : 0;
+
+  // Xa nhanh phan hoi con lai
+  uint32_t t1 = millis();
+  while (millis() - t1 < 100) {
+    while (c->available()) { c->read(); t1 = millis(); }
+    if (!c->connected() && !c->available()) break;
+    delay(1);
+  }
+  c->stop();
+
+  bool was_online = g_server_online;
+  g_server_online = (code == 200);
+  if (g_server_online && !was_online) {
+    Serial.printf("[HEARTBEAT] Da ket noi server %s:%u (Online - Che do cho, KHONG truyen anh)\n",
+                  push_host.c_str(), push_port);
+  } else if (!g_server_online && was_online) {
+    Serial.printf("[HEARTBEAT] Server phan hoi loi HTTP %d (Offline)\n", code);
+  }
+}
+
+// Mot lan nhan nut = 1 phien quet: truyen hinh anh LIEN TUC trong 15s toi server.
+// Server thuc hien nhan dien va ghi nhan diem danh DUNG 1 LAN trong dot 15s do.
+// Ket thuc 15s: den LED bao ket qua tong hop (1 dai = thanh cong, 2 vua = da diem danh,
+// 3 ngan = khong khop, 4 = loi camera, 5 = loi mang).
 static void doButtonCapture() {
   static char resp[2816];   // header ~256B + body cap ~2.5KB (static -> khong ton stack)
 
-  Serial.printf("[BTN] nhan nut -> quet toi da %d giay, POST lien tuc len server\n",
+  Serial.printf("[BTN] Nhan nut -> bat dau truyen anh LIEN TUC %d giay toi server de nhan dien\n",
                 BUTTON_SCAN_SECONDS);
 
-  // WiFi chua len -> bao ngay bang 5 nhanh (khong can day cam, khong ton pin)
+  // WiFi chua len -> bao ngay bang 5 nhanh
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("[BTN] loi mang: WiFi CHUA ket noi duoc (kiem tra ssid/password) -> 5 nhanh");
+    Serial.println("[BTN] loi mang: WiFi CHUA ket noi duoc -> 5 nhanh");
     btnBlink(5, 60, 60);
     return;
   }
@@ -790,8 +907,6 @@ static void doButtonCapture() {
     btnBlink(5, 60, 60);
     return;
   }
-  // Xoa lich tat cam cu: tranh truong hop nhan 2 lan lien nhau
-  // (lich tat cua lan truoc chua kip chay) anh huong phien quet moi.
   g_sleep_req = false;
   if (!push_ensure_buf()) {
     Serial.println("[BTN] loi: khong cap duoc bo dem POST (het RAM/PSRAM)");
@@ -800,29 +915,44 @@ static void doButtonCapture() {
     return;
   }
 
-  // POST toi server, kem ?capture=1 (server biet day la anh nhan nut)
+  g_is_scanning = true;
+
+  // Tao ma phien session_id duy nhat cho dot 15 giay nay
+  char session_id[40];
+  snprintf(session_id, sizeof(session_id), "sess_%lu_%u", (unsigned long)millis(), (unsigned int)random(1000, 9999));
+
+  // Duong dan POST toi server kem capture=1 va session_id
   push_parse_url();
-  if (push_path.indexOf('?') < 0) push_path += "?capture=1";
+  String scan_path = push_path;
+  if (scan_path.indexOf('?') < 0) {
+    scan_path += "?capture=1&session_id=";
+  } else {
+    scan_path += "&capture=1&session_id=";
+  }
+  scan_path += session_id;
+
   Client *c = push_client();
 
-  // Ep sensor ve cau hinh quet chuan MOI phien: dev/user doi size/quality
-  // tren web giua chung (vd XGA vuot qua bo dem VGA cap luc init) se lam
-  // fb NULL mai. Chi doi khi lech (VGA von la cai dat init -> an toan).
+  // EP LAI CAU HINH TRUOC KHI QUET (giong ban minimal da chay duoc):
+  // VGA + quality 12. Khong doi fb_count/grab_mode tai day (cai nay da co dinh
+  // luc init: 1 + WHEN_EMPTY). Neu truoc do web da doi framesize thi ep ve VGA.
   {
-    sensor_t *sens0 = esp_camera_sensor_get();
-    if (sens0) {
-      if (sens0->status.framesize != FRAMESIZE_VGA) {
-        Serial.println("[BTN] framesize bi doi tren web -> ep ve VGA cho phien quet");
-        sens0->set_framesize(sens0, FRAMESIZE_VGA);
+    sensor_t *sens = esp_camera_sensor_get();
+    if (sens) {
+      if (sens->status.framesize != FRAMESIZE_VGA) {
+        Serial.println("[BTN] framesize bi doi tren web -> ep ve VGA");
+        sens->set_framesize(sens, FRAMESIZE_VGA);
       }
-      if (sens0->status.quality != 12) sens0->set_quality(sens0, 12);
+      if (sens->status.quality != 12) sens->set_quality(sens, 12);
+      Serial.printf("[BTN] PSRAM: %s, heap: %u, SPIRAM: %u, sensor PID: 0x%04x, session: %s\n",
+                    psramFound() ? "co" : "KHONG",
+                    (unsigned)ESP.getFreeHeap(),
+                    (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                    sens ? (unsigned)sens->id.PID : 0,
+                    session_id);
     }
   }
 
-  // Bat flash TRUOC khi quet: sensor can LED sang ~250ms moi thay trong anh.
-  // GIU flash SANG SUOT luc quet -> anh sang on dinh, nhan dien chuan hon
-  // (flash sang lien tuc cung la tin hieu "dang quet" cho nguoi dung).
-  // (cf. comment trong app_httpd.cpp, capture_handler)
 #if BUTTON_SCAN_FLASH
   btnLed(true);
   delay(250);
@@ -830,28 +960,31 @@ static void doButtonCapture() {
   Serial.println("[BTN] BUTTON_SCAN_FLASH=0 -> quet khong flash (can du sang moi truong)");
 #endif
 
-  // Chan doan phan cung: in 1 lan moi phien quet. PID dung phai la 0x2642
-  // (OV2640); PID 0x0000/0xFFFF = sensor mat giao tiep (nguon yeu / loi day).
-  {
-    sensor_t *sens = esp_camera_sensor_get();
-    Serial.printf("[BTN] PSRAM: %s, heap: %u, SPIRAM: %u, sensor PID: 0x%04x\n",
-                  psramFound() ? "co" : "KHONG",
-                  (unsigned)ESP.getFreeHeap(),
-                  (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
-                  sens ? (unsigned)sens->id.PID : 0);
+  // NONG MAY: doc 3 khung dau tien de KHOI DONG consumer ngay (khong cho
+  // FB-OVF). Neu khong co khung nao -> dung ngay bang 4 nhap.
+  if (camWarmup() == 0) {
+    Serial.println("[BTN] camera KHONG xuat frame -> bo qua dot 15s, 4 nhap");
+    btnLed(false);
+    g_is_scanning = false;
+    btnBlink(4, 120, 120);
+    cam_sleep_request();
+    return;
   }
 
   uint32_t t_end = millis() + (uint32_t)BUTTON_SCAN_SECONDS * 1000UL;
-  int frames = 0, fails = 0, last_fail = 0;  // last_fail: 4 = loi CHUP, 5 = loi GUI
-  int outcome = 0;   // 0 = het gio chua khop, 1 = diem danh OK, 2 = da diem danh,
-                     // 4 = khong chup duoc khung, 5 = loi mang
+  int frames = 0, fails = 0, last_fail = 0;  // last_fail: 4 = loi LAY KHUNG, 5 = loi GUI
+  int best_outcome = 0;   // 0 = chua khop, 1 = diem danh OK, 2 = da diem danh
   char final_name[64];
   final_name[0] = '\0';
 
-  while ((int32_t)(t_end - millis()) > 0 && outcome == 0) {
+  // Truyen hinh anh LIEN TUC trong suot 15 giay (KHONG break som khi khop)
+  while ((int32_t)(t_end - millis()) > 0) {
+    uint32_t t_get = millis();
     camera_fb_t *fb = esp_camera_fb_get();
+    uint32_t dt_get = millis() - t_get;
     if (!fb) {
-      Serial.println("[BTN] loi CAMERA: khong chup duoc khung nao (kiem tra cam/nguon)");
+      Serial.printf("[BTN] loi CAMERA: khong lay duoc khung (fb NULL, doi %lu ms, heap %u)\n",
+                    (unsigned long)dt_get, (unsigned)ESP.getFreeHeap());
       fails++;
       last_fail = 4;
     } else if (fb->len > PUSH_JPEG_MAX) {
@@ -862,7 +995,7 @@ static void doButtonCapture() {
     } else {
       size_t len = fb->len;
       memcpy(push_buf, fb->buf, fb->len);
-      esp_camera_fb_return(fb);   // tra fb NGAY, khong cham giua stream noi bo
+      esp_camera_fb_return(fb);   // tra fb ngay
       frames++;
 
       if (!push_connect(c)) {
@@ -872,7 +1005,7 @@ static void doButtonCapture() {
         fails++;
         last_fail = 5;
       } else {
-        bool sent = push_post_frame(c, push_buf, len);
+        bool sent = push_post_frame(c, push_buf, len, scan_path.c_str());
         int code = push_read_response_body(c, resp, sizeof(resp), 3000);
         c->stop();
 
@@ -881,12 +1014,10 @@ static void doButtonCapture() {
           fails++;
           last_fail = 5;
         } else {
-          fails = 0;   // POST thanh cong -> xoa dem loi lien tiep
+          fails = 0;   // POST thanh cong
           g_push_ok = g_push_ok + 1;
           g_push_state = 1;
 
-          // Tich "da chup + da gui" (rieng voi ket qua nhan dien phia sau):
-          // chop tat 80ms giua nen flash sang, hoac nhap sang 100ms giua nen toi.
 #if BUTTON_SCAN_FLASH
           btnLed(false);
           delay(80);
@@ -904,66 +1035,71 @@ static void doButtonCapture() {
                                          name, sizeof(name));
 
           if (matched && !already) {
-            outcome = 1;
-            strncpy(final_name, name, sizeof(final_name) - 1);
-            break;   // TRUNG -> dung quet som, khong can het 15 giay
+            if (best_outcome != 1) {
+              best_outcome = 1;
+              strncpy(final_name, name, sizeof(final_name) - 1);
+              final_name[sizeof(final_name) - 1] = '\0';
+              Serial.printf("[BTN] Khung %d: KHOP -> %s (Diem danh 1 lan cho dot 15s, tiep tuc truyen du 15s)\n",
+                            frames, final_name);
+            }
           } else if (matched && already) {
-            outcome = 2;
-            strncpy(final_name, name, sizeof(final_name) - 1);
-            break;   // DA DIEM DANH -> dung quet som
+            if (best_outcome == 0) {
+              best_outcome = 2;
+              strncpy(final_name, name, sizeof(final_name) - 1);
+              final_name[sizeof(final_name) - 1] = '\0';
+              Serial.printf("[BTN] Khung %d: KHOP -> %s (Da diem danh truoc do, tiep tuc truyen du 15s)\n",
+                            frames, final_name);
+            }
           } else if (ids == 0) {
-            Serial.printf("[BTN] khung %d: server CHUA CO MAU MAT NAO - dang ky truoc\n",
-                          frames);
+            Serial.printf("[BTN] Khung %d: server CHUA CO MAU MAT NAO\n", frames);
           } else if (faces <= 0) {
-            Serial.printf("[BTN] khung %d: da gui OK nhung khong thay mat "
-                          "(phong trong / chup vat khong phai mat)\n", frames);
+            Serial.printf("[BTN] Khung %d: da gui OK nhung khong thay mat\n", frames);
           } else {
-            Serial.printf("[BTN] khung %d: thay %d mat nhung khong khop ai\n",
-                          frames, faces);
+            Serial.printf("[BTN] Khung %d: thay %d mat nhung khong khop\n", frames, faces);
           }
         }
       }
     }
 
     if (fails >= BUTTON_MAX_FAILS) {
-      outcome = (last_fail == 4) ? 4 : 5;   // bao dung loai loi gap gan nhat
-      if (outcome == 5) {
-        Serial.println("[BTN] loi mang lien tuc -> dung quet, 5 nhanh");
-        g_push_err = g_push_err + 1;
-        g_push_state = 0;
-      } else {
-        Serial.println("[BTN] loi camera lien tuc -> dung quet, 4 nhanh");
-      }
+      Serial.println("[BTN] Loi ket noi/camera lien tiep qua nguong -> dung dot quet");
       break;
     }
     delay(BUTTON_POST_GAP_MS);   // nhip quet ~2-3 khung/giay
   }
-  // Het gio ma duoi co loi (chua du 3 lan de dung som) -> bao theo loi cuoi.
-  if (outcome == 0 && fails > 0 && (last_fail == 4 || last_fail == 5)) {
-    outcome = last_fail;
-  }
 
-  btnLed(false);   // tat flash TRUOC khi nhap LED bao ket qua
+  btnLed(false);   // tat flash
+  g_is_scanning = false;
+
+  // Ngay lap tuc gui 1 heartbeat (phase=idle) de server biet dot 15s da ket thuc
+  // -> hien thi lai che do CHO thay vi cho het cua so 16s sau khung cuoi.
+  g_last_heartbeat_ms = 0;   // chan buoc: heartbeat tiep theo gui NGAY
+  heartbeatPoll();
+
+  int outcome = best_outcome;
+  if (outcome == 0 && fails >= BUTTON_MAX_FAILS) {
+    outcome = (last_fail == 4) ? 4 : 5;
+  }
 
   if (outcome == 1) {
-    Serial.printf("[BTN] Diem danh OK sau %d khung: %s\n",
-                  frames, final_name[0] ? final_name : "(khong doc duoc ten)");
+    Serial.printf("[BTN] Ket thuc 15s (%d khung): Diem danh THANH CONG -> %s\n",
+                  frames, final_name[0] ? final_name : "(khong ten)");
     btnBlink(1, 800, 200);            // 1 nhap dai
   } else if (outcome == 2) {
-    Serial.printf("[BTN] %s da diem danh roi trong buoi nay (%d khung)\n",
-                  final_name[0] ? final_name : "Hoc sinh", frames);
+    Serial.printf("[BTN] Ket thuc 15s (%d khung): %s da diem danh roi\n",
+                  frames, final_name[0] ? final_name : "Hoc sinh");
     btnBlink(2, 300, 200);            // 2 nhap vua
   } else if (outcome == 4) {
-    Serial.println("[BTN] Khong chup duoc khung nao - kiem tra camera/nguon");
+    Serial.println("[BTN] Ket thuc 15s: Loi camera");
     btnBlink(4, 120, 120);            // 4 nhap ngan
   } else if (outcome == 5) {
+    Serial.println("[BTN] Ket thuc 15s: Loi mang/server");
     btnBlink(5, 60, 60);              // 5 nhanh
   } else {
-    Serial.printf("[BTN] Het %d giay (%d khung): da gui OK nhung khong khop\n",
-                  BUTTON_SCAN_SECONDS, frames);
+    Serial.printf("[BTN] Ket thuc 15s (%d khung): Da truyen du 15s nhung khong khop\n", frames);
     btnBlink(3, 120, 120);            // 3 nhap ngan
   }
-  cam_sleep_request();                // het phien quet (hien la no-op, giu API)
+  cam_sleep_request();                // het phien quet
 }
 
 // Poll nut nhan (khong block): debounce + xuong canh + cooldown
@@ -1100,7 +1236,19 @@ static void serialPoll() {
 
 void setup() {
   Serial.begin(115200);
-  // Tat debug log tren UART -> giam nhieu, stream muot hon nhieu
+
+  // DA CHAN DOAN XONG (2026-10-12): NGUYEN NHAN "cam_hal: FB-OVF" + fb_get NULL
+  // 4000ms chinh la DO NHET UART BOI LOG VERBOSE NAY:
+  //  - Mo esp_log_level_set(VERBOSE) cho cac tag cam/cam_hal/ll_cam + dat
+  //    Serial.setDebugOutput(true) -> MOI khung hang (~25 fps) sinh vai dong
+  //    log blocking tren UART 115200 (~1ms/dong).
+  //  - Task camera bi chan ghi log -> khong tra buffer kip -> driver bao
+  //    FB-OVF (frame buffer overflow) -> chinh dong spam do lai nghet hon
+  //    -> esp_camera_fb_get() het timeout 4000ms -> NULL.
+  //  - Ban CamButtonStrip (KHONG co 2 cai nay) chay binh tren CUNG board,
+  //    cung sensor OV5640, cung cau hinh VGA/q12/fb1/WHEN_EMPTY.
+  // GIU NGUYEN false + khong mo VERBOSE: chi in log cua CHUNG TA (Serial.printf)
+  // la du, khong can log driver camera trong suat dong.
   Serial.setDebugOutput(false);
   Serial.println();
 
@@ -1119,10 +1267,8 @@ void setup() {
 #endif
 
 #if BUTTON_ENABLE
-  // Che do nhan nut: cam OI TU LUC BOOT (chua init), chi day khi co nguoi yeu
-  // cau: nhan nut hoac dev mo /capture, /stream, /live?state=1.
-  // Neu cam loi cung van chay tiep web + nut nhan (nut se bao loi bang 5 nhanh).
-  Serial.println("[BTN] Camera OFF (cho nhan nut), web van chay tai :80");
+  // Camera dang OI tu luc boot, chi day len khi co nguoi yeu cau (nhan nut
+  // -> doButtonCapture -> camWake) hoac dev mo /capture, /stream, /live?state=1.
 #else
   if (!camWake()) {   // che do cu: loi camera -> dung setup nhu truoc
     return;
@@ -1176,6 +1322,17 @@ void setup() {
   delay(1500);
   btnLed(false);
 
+#if BUTTON_ENABLE
+#endif
+
+  // ---- KHONG DAY CAMERA TAI BOOT ----
+  // Chi init camera ngay truoc khi doc frame (doButtonCapture hoac dev mo
+  // /capture, /stream, /live). Camera dang OI se du day len khi can, va se tu
+  // "tat" (khong doc frame) sau CAM_OFF_DELAY_MS khi khong con ai su dung.
+  // (Luu y: loi truoc day "cam_hal: FB-OVF" KHONG phai do thoi diem init ma do
+  // log driver camera VERBOSE nghet UART - xem doan Serial.setDebugOutput.)
+  Serial.println("[CAM] Camera dang OI - se day khi nhan nut / dev mo /capture, /stream");
+
   startCameraServer();
 
 #if PUSH_ENABLE
@@ -1223,7 +1380,9 @@ void loop() {
     Serial.printf("[BTN] GPIO13 -> %s\n", raw_now ? "LOW (dang nhan)" : "HIGH (nha nut)");
   }
 
-  buttonPoll();   // nhan nut -> quet lien tuc toi da 15 giay (block trong phien quet)
+  buttonPoll();   // nhan nut -> truyen anh lien tuc 15 giay (block trong phien quet)
+
+  heartbeatPoll(); // duy tri ket noi (khong truyen anh) trong che do cho
 
   // Nhin tat cam theo lich (hien tai camSleep() la no-op de tranh loi driver;
   // giu lai loi goi de API khong doi).
@@ -1233,7 +1392,7 @@ void loop() {
   }
   delay(5);   // nhe CPU, van du do cho debounce 30ms
 #else
-  // Do nothing. Everything is done in another task by the web server
-  delay(10000);
+  heartbeatPoll();
+  delay(100);
 #endif
 }

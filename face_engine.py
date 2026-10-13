@@ -517,11 +517,16 @@ class FaceMatcher:
 
     # -------------------------------------------------------------------- so khớp
     def rank_for(self, emb: np.ndarray):
-        """Xếp hạng mọi người theo khoảng cách nhỏ nhất tới mẫu của họ."""
+        """Xếp hạng mọi người theo khoảng cách nhỏ nhất tới mẫu của họ.
+
+        Khoảng cách cosin = 1 - tích lượng; muốn lấy người GẦN NHẤT thì phải
+        lấy 1 - MAX(tích lượng). Trả về 1 - MIN(...) sẽ ra khoảng cách tới mẫu
+        XA NHẤT, khiến mọi khung đều bị coi là "không khớp".
+        """
         if self.metric != "cosine" or emb is None:
             return []
         with self._lock:
-            items = [(sid, float(1.0 - (emb @ mat.T).min()))
+            items = [(sid, float(1.0 - (emb @ mat.T).max()))
                      for sid, mat in self.gallery.items()]
         items.sort(key=lambda kv: kv[1])
         return items

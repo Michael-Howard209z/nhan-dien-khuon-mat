@@ -462,6 +462,67 @@ def main():
     diff = n_log1 - n_log0
     check("nhật ký ghi mỗi lần bấm nút (3 dòng) — trừ khi đã chạm giới hạn giữ",
           diff == 3 or n_log0 >= db.LOG_KEEP, diff)
+
+    print("\n--- 9. ESP32 Heartbeat và Quét 15s (1 lần/phiên) ---")
+    # 1. Heartbeat không cần session cookie (ESP32-CAM gọi trực tiếp)
+    r_hb = requests.get(f"{CAM}/api/esp32/heartbeat", timeout=5)
+    check("GET /api/esp32/heartbeat trả 200", r_hb.ok and r_hb.json().get("ok") is True, r_hb.text)
+    check("Server báo trạng thái active", r_hb.json().get("server") == "active", r_hb.text)
+
+    r_hb_post = requests.post(f"{CAM}/api/esp32/heartbeat", timeout=5)
+    check("POST /api/esp32/heartbeat trả 200", r_hb_post.ok and r_hb_post.json().get("ok") is True, r_hb_post.text)
+
+    # 2. Kiểm tra status ESP32 phản ánh online=True
+    st_esp = dev.get(f"{CAM}/api/esp32/status").json()
+    check("ESP32 status online=True sau heartbeat", st_esp.get("online") is True, json.dumps(st_esp))
+    check("ESP32 status is_scanning=False khi ở chế độ chờ", st_esp.get("is_scanning") is False, json.dumps(st_esp))
+    check("ESP32 status mode=idle (chỉ heartbeat, không truyền ảnh)",
+          st_esp.get("mode") == "idle", json.dumps(st_esp))
+
+    # 2b. Heartbeat kèm thông số board (heap/rssi) + phase=idle (kết thúc quét ngay)
+    requests.get(f"{CAM}/api/esp32/heartbeat",
+                 params={"heap": 123456, "rssi": -55, "phase": "idle"}, timeout=5)
+    st_hb = dev.get(f"{CAM}/api/esp32/status").json()
+    check("heartbeat ghi nhận heap/rssi của board",
+          st_hb.get("heap") == 123456 and st_hb.get("rssi") == -55, json.dumps(st_hb))
+    check("phase=idle -> is_scanning=False ngay lập tức",
+          st_hb.get("is_scanning") is False, json.dumps(st_hb))
+
+    # 2c. heartbeat KHÔNG làm sai cờ push_alive (push_alive = đang nhận ẢNH)
+    check("push_alive=False khi chỉ có heartbeat (không truyền ảnh)",
+          st_hb.get("push_alive") is False, json.dumps(st_hb))
+
+    # 3. Quét 15s liên tục: nhiều khung trong cùng session_id chỉ ghi nhận điểm danh đúng 1 LẦN
+    sess_id = f"test_sess_{int(time.time())}"
+    res_burst = {"match": True, "student_id": sid_once, "full_name": "Test Một Lần",
+                 "class_name": "ZZONCE", "confidence": 0.1}
+
+    def _log_rows_of(sid):
+        return sum(1 for row in db.recent_log(db.LOG_KEEP)
+                   if int(row.get("student_id") or 0) == int(sid))
+
+    n_log_burst0 = _log_rows_of(sid_once)
+    burst_results = [
+        server_mod.record_results([dict(res_burst)], session_id=sess_id)
+        for _ in range(5)
+    ]
+    n_log_burst1 = _log_rows_of(sid_once)
+    check("Khung đầu tiên trong phiên 15s: match=True",
+          burst_results[0].get("matched") == 1, json.dumps(burst_results[0]))
+    check("Tất cả các khung sau trong cùng phiên 15s: already=True",
+          all(b.get("already") is True for b in burst_results[1:]),
+          json.dumps(burst_results[1:]))
+    check("5 khung trong cùng phiên 15s -> chỉ ghi thêm 1 dòng điểm danh",
+          n_log_burst1 - n_log_burst0 == 1, f"{n_log_burst0} -> {n_log_burst1}")
+    check("Mọi khung trong phiên trả session_recorded=True",
+          all(b.get("session_recorded") is True for b in burst_results),
+          json.dumps(burst_results))
+
+    # 3b. Phiên KHÁC (nhấn nút lần 2) vẫn được chấm lại bình thường
+    other = server_mod.record_results([dict(res_burst)], session_id=f"{sess_id}_2")
+    check("Phiên 15s mới (session_id khác) vẫn ghi nhận điểm danh",
+          other.get("matched") == 1, json.dumps(other))
+
     r = admin.delete(f"{PORTAL}/api/students/{sid_once}")
     check("xoá học sinh thử", r.ok, r.text)
     admin.delete(f"{PORTAL}/api/classes/ZZONCE")

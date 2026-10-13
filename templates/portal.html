@@ -658,11 +658,21 @@
     <div class="tablewrap">
       <table>
         <tbody>
-          <tr><td>PUSH từ ESP32</td><td>
-            {% if sysinfo.esp32.push_alive %}<span class="at yes">sống</span> · {{ sysinfo.esp32.push_count }} khung
-            {% else %}<span class="at no">không nhận</span>{% if sysinfo.esp32.push_last_age %} · lần cuối {{ sysinfo.esp32.push_last_age }}s{% endif %}{% endif %}
+          <tr><td>Trạng thái ESP32</td><td>
+            {% if sysinfo.esp32.is_scanning %}<span class="at yes">đang quét 15s</span> · {{ sysinfo.esp32.push_count }} khung
+            {% elif sysinfo.esp32.online %}<span class="at yes">Online (chế độ chờ — không truyền ảnh)</span>{% if sysinfo.esp32.heartbeat_age %} · ping {{ sysinfo.esp32.heartbeat_age }}s trước{% endif %}
+            {% elif sysinfo.esp32.push_alive %}<span class="at yes">đang push</span> · {{ sysinfo.esp32.push_count }} khung
+            {% else %}<span class="at no">chưa kết nối</span>{% if sysinfo.esp32.push_last_age %} · lần cuối {{ sysinfo.esp32.push_last_age }}s{% endif %}{% endif %}
           </td></tr>
           <tr><td>IP ESP32</td><td>{{ sysinfo.esp32.ip or '—' }}</td></tr>
+          <tr><td>Phiên quét 15s</td><td>
+            {% if sysinfo.esp32.session_id %}<code>{{ sysinfo.esp32.session_id }}</code>{% if sysinfo.esp32.scan_age %} · khung cuối {{ sysinfo.esp32.scan_age }}s trước{% endif %}
+            {% else %}—{% endif %}
+          </td></tr>
+          <tr><td>Sức khoẻ board</td><td>
+            {% if sysinfo.esp32.rssi is not none %}WiFi {{ sysinfo.esp32.rssi }} dBm{% else %}—{% endif %}
+            {% if sysinfo.esp32.heap is not none %} · heap {{ sysinfo.esp32.heap }} byte{% endif %}
+          </td></tr>
           <tr><td>PULL (STREAM_URL)</td><td>{{ sysinfo.stream_url or '—' }}</td></tr>
           <tr><td>Camera kết nối</td><td>{% if sysinfo.camera.connected %}<span class="at yes">kết nối</span> · {{ sysinfo.camera.fps }} fps{% else %}<span class="at no">ngắt</span>{% endif %} {% if sysinfo.camera.error %}<div class="muted">{{ sysinfo.camera.error }}</div>{% endif %}</td></tr>
           <tr><td>Nguồn khung hiện tại</td><td><b>{{ sysinfo.frame_source }}</b></td></tr>

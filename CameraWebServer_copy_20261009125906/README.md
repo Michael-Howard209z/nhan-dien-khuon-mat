@@ -1,15 +1,18 @@
 # ESP32-CAM + Server nhận diện khuôn mặt (Python)
 
 Thư mục này là firmware ESP32-CAM đã tích hợp sẵn với server Python ở thư mục gốc
-(`server.py`). Gồm mẫu `CameraWebServer` của Espressif + **chế độ nút nhấn** (mặc định):
-nhấn nút → quét liên tục tối đa 15 giây (POST từng khung lên server, trúng là dừng
-sớm) → LED báo kết quả → tắt camera.
+(`server.py`). Gồm mẫu `CameraWebServer` của Espressif + **chế độ nút nhấn & heartbeat**:
+- **Chế độ chờ (idle)**: ESP32-CAM và server KHÔNG truyền hình ảnh, chỉ gửi heartbeat
+  nhẹ (`GET /api/esp32/heartbeat`) mỗi 3s để biết nhau đang online/hoạt động.
+- **Khi nhấn nút**: ESP32-CAM truyền hình ảnh LIÊN TỤC trong 15 giây đến server.
+- **Server nhận diện**: ghi nhận điểm danh đúng 1 LẦN trong đợt 15 giây đó.
+- **Hết 15 giây**: đèn LED nháy báo kết quả tổng hợp và trở về chế độ chờ (không truyền ảnh).
 
 ## 1. Chế độ hoạt động (chọn 1 trong 3)
 
 | Chế độ | ESP32 (`.ino`) | Server (`.env` / web) | Khi nào dùng |
 |---|---|---|---|
-| **BUTTON — nút nhấn (mặc định)** | `BUTTON_ENABLE = 1` | Không cần `STREAM_URL`; ESP32 POST `PUSH_URL?capture=1` liên tục tối đa 15 s mỗi lần bấm (trúng là dừng sớm) | Chạy thật: 1 nút = 1 phiên quét điểm danh, cam OFF khi nghỉ |
+| **BUTTON — nút nhấn (mặc định)** | `BUTTON_ENABLE = 1` | Chế độ chờ: không truyền ảnh (chỉ heartbeat 3s). Nhấn nút: truyền ảnh liên tục 15s đến `PUSH_URL?capture=1&session_id=...` (điểm danh 1 lần/phiên) | Chạy thật: tiết kiệm băng thông, truyền ảnh liên tục 15s khi bấm nút |
 | **PULL** | `BUTTON_ENABLE = 0`, `PUSH_ENABLE = 0` | `STREAM_URL = http://<ip-esp32>:81/stream` | Test nhanh 1 cam, không sửa firmware nhiều |
 | **PUSH** (liên tục) | `BUTTON_ENABLE = 0`, `PUSH_ENABLE = 1`, `PUSH_MODE_MJPEG = 0`, `PUSH_URL = http://<ip-may>:5001/api/esp32/frame` | Không cần `STREAM_URL` | Nhiều cam, NAT, hoặc muốn cam chủ động đẩy liên tục |
 
@@ -72,26 +75,23 @@ Một số lưu ý:
 - Nút và server phải ở trạng thái bình thường; nút chỉ có tác dụng khi ESP32 đã kết nối WiFi
   (firmware kết nối WiFi ngay khi boot, có vòng lặp chờ).
 
-### Luồng 1 lần bấm (quét tối đa 15 giây)
+### Luồng 1 lần bấm (truyền ảnh liên tục 15 giây)
 
-1. `camWake()` — bật nguồn sensor (PWDN GPIO32 = LOW) + `esp_camera_init` (nếu đang OFF).
-2. Bật flash → chờ 250 ms (sensor cần LED sáng trước khi chụp) → **giữ flash SÁNG
-   suốt phiên quét** (ánh sáng ổn định, đồng thời là tín hiệu "đang quét").
-3. Lặp (~2–3 khung/giây, tối đa `BUTTON_SCAN_SECONDS` = 15 giây):
-   chụp 1 JPEG → `POST PUSH_URL?capture=1` (multipart/form-data, field `file`,
-   boundary `esp32cam`) → đọc JSON phản hồi ngay. Mỗi POST 2xx nháy **tích**
-   80–100 ms (báo "đã chụp + đã gửi", tách bạch với kết quả nhận diện).
-   - `matched ≥ 1, already:false` → điểm danh OK → **dừng sớm**, 1 nháy dài.
-   - `matched ≥ 1, already:true` → đã điểm danh buổi này → **dừng sớm**, 2 nháy.
-   - Chưa khớp → quét tiếp; log Serial phân loại: `server CHUA CO MAU` /
-     `khong thay mat` (khung trống) / `thay N mat nhung khong khop`.
-   - Lỗi chụp liên tiếp (`fb NULL`) → dừng, **4 nháy** (lỗi camera, khác 5 nháy mạng).
-   - POST lỗi liên tiếp `BUTTON_MAX_FAILS` (3) lần → dừng, 5 nháy.
-4. Tắt flash → nháy LED theo kết quả + in log Serial (ASCII).
-5. Giữ cam bật thêm `CAM_OFF_DELAY_MS` (1500 ms) rồi kết thúc phiên quét
-   (KHÔNG deinit: driver esp-camera không chịu deinit/reinit giữa chừng —
-   init lại sẽ chết `frame buffer malloc failed`; camera init 1 lần duy nhất
-   rồi giữ nguyên suốt uptime, sensor chỉ chạy thật khi quét hoặc stream).
+1. `camWake()` — bật nguồn sensor (PWDN GPIO32 = LOW) + `esp_camera_init` (nếu chưa init).
+2. Tạo mã phiên `session_id` ngẫu nhiên duy nhất cho phiên 15s này.
+3. Bật flash (nếu `BUTTON_SCAN_FLASH=1`) hoặc dùng ánh sáng phòng.
+4. Lặp liên tục (~2–3 khung/giây) trong suốt **15 giây**:
+   chụp JPEG → `POST PUSH_URL?capture=1&session_id=<sess_id>` (multipart/form-data).
+   - Server nhận diện khuôn mặt và **ghi nhận điểm danh đúng 1 LẦN** trong suốt phiên 15s đó.
+   - Các khung hình tiếp theo trong cùng phiên 15s vẫn được gửi bình thường để server xử lý và hiển thị, không bị ghi đè hay nhân bản điểm danh (`already:true`).
+   - ESP32 KHÔNG dừng sớm mà **tiếp tục truyền đủ 15 giây** để đảm bảo đầy đủ hình ảnh.
+   - Nếu lỗi kết nối liên tiếp quá 3 lần (`BUTTON_MAX_FAILS`) → dừng sớm và báo lỗi.
+5. Tắt flash → nháy LED theo kết quả tổng hợp của cả đợt 15s:
+   - 1 nháy dài: điểm danh thành công.
+   - 2 nháy vừa: đã điểm danh trước đó.
+   - 3 nháy ngắn: đã truyền đủ 15s nhưng không khớp ai.
+   - 4 nháy: lỗi camera; 5 nháy: lỗi mạng/server.
+6. Trở lại chế độ chờ (không truyền ảnh, tiếp tục heartbeat mỗi 3s).
 
 ### Ý nghĩa nháy LED (sau mỗi lần bấm)
 
@@ -147,10 +147,34 @@ Web server trên cổng 80 **vẫn chạy** trong chế độ nút nhấn để 
   sensor OV5640, fb NULL). Chế độ nút nhấn quét ~2–3 khung/giây trong tối đa
   15 s nên dư sức chạy VGA.
 - Chất lượng JPEG: `12` (10 = nét, 20+ = nhẹ/nhanh).
+- `CAM_FB_COUNT` / `CAM_GRAB_LATEST` (đầu file `.ino`): mặc định **1 + WHEN_EMPTY**
+  — đúng cấu hình của bản chẩn đoán `CamButtonStrip` đã chạy được trên chính
+  board này. Chỉ đổi sang `2 + LATEST` khi cần mở `:81/stream` trong lúc bấm nút
+  (2 consumer cùng giữ frame buffer).
 - Server: có thể hạ `MIN_FACE_SIZE` xuống `24–32` nếu mặt vẫn nhỏ, tăng `DETECT_SCORE`
   nếu nhiều báo giả.
 - `PUSH_MODE_MJPEG = 0` cho server Flask (mỗi khung 1 POST field `file`).
   `= 1` (luồng MJPEG chunked) chỉ dùng khi server hiểu MJPEG push — Flask dễ treo.
+
+### Thang chẩn đoán khi gặp fb NULL (0/3 khung)
+
+**Nguyên nhân thật đã chốt (2026-10-12): `cam_hal: FB-OVF` + `fb_get` NULL 4000 ms
+là do bật log driver camera VERBOSE** (`esp_log_level_set(...VERBOSE)` × 5 +
+`Serial.setDebugOutput(true)`): mỗi khung ~25 fps sinh vài dòng log blocking trên
+UART 115200 (~1 ms/dòng) → task camera không trả buffer kịp → driver báo frame
+buffer overflow → chính dòng spam FB-OVF làm nghẹt thêm → `fb_get` timeout.
+Bản tối giản `CamButtonStrip` (không có 2 cài đặt này) chạy tốt trên **cùng** board,
+cùng sensor OV5640, cùng VGA/q12/fb1. Firmware đã tắt lại (`setDebugOutput(false)`,
+không bật VERBOSE) và đưa `CAM_FB_COUNT=1` + `CAM_GRAB_LATEST=0`.
+
+Nếu sau này cần chẩn đoán lại, chỉ bật log theo **thời điểm** (ngay trước khi
+`fb_get`), không bật VERBOSE suốt dòng:
+
+| Bước | Xem gì | Kết luận |
+|---|---|---|
+| 1. `[CAM] init: VGA/q12/fb_count=1/grab=WHEN_EMPTY/PSRAM=co` + `[CAM] nong may 3/3 OK` | Camera ấm máy tốt khi bấm nút | Camera OK, sang bước network/server |
+| 2. `[BTN] POST ... HTTP 200` | Server trả JSON có `results`/`matched` | Toàn bộ pipeline thông |
+| 3. Nạp `CamButtonStrip/CamButtonStrip.ino` (bản tối giản, cùng pin + cùng VGA/q12/fb1) | `POST 200` vs `fb NULL` | `POST 200` = phần cứng tốt (lỗi ở firmware chính); `fb NULL` = **nguồn/dây/cam**, sửa phần cứng |
 
 ## 6. Quay lại hành vi cũ / tắt các tính năng mới
 
@@ -164,15 +188,19 @@ Web server trên cổng 80 **vẫn chạy** trong chế độ nút nhấn để 
 - `BUTTON_SCAN_FLASH` — `1` = giữ flash sáng khi quét (mặc định); `0` = quét không
   flash, dùng khi **nguồn yếu** (xem mục sự cố dưới).
 
-### Sự cố: `chup anh that bai` (fb NULL) + 5 nháy dù WiFi tốt
+### Sự cố: 4 nháy "lỗi camera" (fb NULL) dù WiFi tốt
 
-Init camera OK nhưng sensor không ra khung nào (mỗi lần treo vài giây) — điển
-hình là **nguồn nuôi yếu**: flash + WiFi công suất max + camera cùng lúc làm sụt
-áp, sensor treo trong khi CPU/WiFi vẫn sống.
+`esp_camera_fb_get()` luôn trả NULL nghĩa là **sensor không xuất frame** (không
+phải lỗi mạng — mạng hỏng sẽ là 5 nháy). Firmware mới in rõ nguyên nhân ở 2 dòng:
+
+- Lúc boot: `[CAM] nong may khung 1: OK/NULL (doi ... ms)` → `3/3 khung` là camera tốt.
+- Lúc bấm nút: `[BTN] loi CAMERA: khong lay duoc khung (fb NULL, doi ... ms, heap ...)`.
+
+Khi 3/3 NULL: kiểm tra theo thứ tự
 
 1. **Đổi nguồn trước:** sạc điện thoại 5V⎓2A cấp thẳng vào chân **5V + GND**
    (dây ngắn, to), không nuôi qua cáp USB-UART mảnh/cổng laptop yếu.
-2. Nạp firmware mới, bấm nút, đọc dòng chẩn đoán:
+2. Đọc dòng chẩn đoán:
    `[BTN] PSRAM: co/khong, heap: ..., SPIRAM: ..., sensor PID: 0x...`
    - `PID: 0x0000` → sensor mất giao tiếp (nguồn/dây).
    - `PSRAM: KHONG` → board không có PSRAM hoặc chọn sai board (phải là
@@ -180,6 +208,9 @@ hình là **nguồn nuôi yếu**: flash + WiFi công suất max + camera cùng 
    - PID `0x2642` (OV2640) + vẫn NULL → nguồn vẫn yếu, làm bước 1 kỹ hơn.
 3. Tạm thời đặt `BUTTON_SCAN_FLASH = 0`, nạp lại, quét dưới ánh sáng môi trường
    đủ (giảm dòng tiêu thụ lúc quét).
+4. Nếu PID đọc được (`0x5640` OV5640) mà vẫn 3/3 NULL → nghi **XCLK (GPIO0) bị
+   chiếm**: tuyệt đối không gọi `ledcAttach`/`analogWrite` ở bất kỳ chân nào
+   khi camera đang chạy (LEDC timer 0 là của XCLK 20 MHz).
 
 ## 7. Nạp firmware
 

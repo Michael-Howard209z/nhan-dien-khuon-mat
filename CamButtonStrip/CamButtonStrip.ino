@@ -6,6 +6,11 @@
 //  WiFi mac dinh, khong webserver/NVS/vflip/flash/LEDC), chi them nut nhan
 //  + POST anh tho (raw JPEG) len server + LED do bao ket qua.
 //
+//  Canh bao: ban nay co the KHONG chay duoc tren mot so board VI firmware chinh
+//  (webserver/NVS/heartbeat) dang gay ra "cam_hal: FB-OVF". Neu ban nay cung
+//  FB-OVF -> benh nam ngoai code (nguon/day/cam). Neu ban nay chay duoc ->
+//  benh nam trong firmware chinh (webserver/NVS/...).
+//
 //  Cach dung:
 //   1. Arduino IDE: File -> New, dan NGUYEN FILE nay, Board "AI Thinker
 //      ESP32-CAM", partition nhu firmware chinh, sua ssid/password/
@@ -16,8 +21,8 @@
 //  Doc ket qua:
 //   - "POST 200 ... matched=1"  -> phan cung/nguon OK, benh nam o firmware
 //     chinh (webserver/sleep/vflip/PWDN...), dev se bisect tu day.
-//   - "fb NULL" mai            -> benh nam ngoai code (nguon day dan/cam),
-//     du firmware chinh co sua gi cung vay.
+//   - "cam_hal: FB-OVF"         -> DMA/driver khong dua frame ra duoc ->
+//     benh phan cung (nguon/day/cam), khong phai do luong diem danh.
 // ============================================================================
 #include "esp_camera.h"
 #include <WiFi.h>
@@ -105,7 +110,7 @@ static void post_frame(uint8_t *jpg, size_t len) {
   // tach host/port/path tu SERVER_URL (chi ho tro http://host:port/duong-dan)
   String u = String(SERVER_URL);
   int p = u.indexOf("://");
-  p = (p < 0) ? 0 : p + 3;
+  if (p < 0) p = 0; else p += 3;
   int slash = u.indexOf('/', p);
   String hp = (slash < 0) ? u.substring(p) : u.substring(p, slash);
   String path = (slash < 0) ? "/" : u.substring(slash);
@@ -137,46 +142,44 @@ static void post_frame(uint8_t *jpg, size_t len) {
   while (millis() - t0 < 6000 && resp.length() < 3072) {
     while (cli.available() && resp.length() < 3072) resp += (char)cli.read();
     if (!cli.connected() && !cli.available()) break;
-    delay(5);
+    delay(2);
   }
   cli.stop();
-  int code = 0, sp1 = resp.indexOf(' ');
-  if (sp1 > 0) code = resp.substring(sp1 + 1).toInt();
-  String body = resp;
-  int hb = resp.indexOf("\r\n\r\n");
-  if (hb >= 0) body = resp.substring(hb + 4);
-  if (code < 200 || code >= 300) {
-    Serial.printf("HTTP %d\n", code);
-    redBlink(5, 60, 60);
-    return;
-  }
-  int matched = (body.indexOf("\"matched\":1") >= 0
-                 || body.indexOf("\"matched\": 1") >= 0) ? 1 : 0;
-  int already = (body.indexOf("\"already\":true") >= 0
-                 || body.indexOf("\"already\": true") >= 0) ? 1 : 0;
-  Serial.printf("HTTP OK matched=%d already=%d\n", matched, already);
+  int h = resp.indexOf("\r\n\r\n");
+  String body = (h >= 0) ? resp.substring(h + 4) : resp;
+  Serial.printf("HTTP %s body=%s\n", resp.substring(9, 12).c_str(), body.c_str());
+
+  // LED phep biet: 1 nhap dai = matched, 2 nhap vua = already, 3 = khong khop
+  int matched = body.indexOf("\"matched\":1") >= 0 ||
+                body.indexOf("\"matched\": 1") >= 0;
+  int already = body.indexOf("\"already\":true") >= 0 ||
+                body.indexOf("\"already\": true") >= 0;
   if (matched && !already) redBlink(1, 800, 200);
   else if (matched && already) redBlink(2, 300, 200);
   else redBlink(3, 120, 120);
 }
 
 void loop() {
-  bool pressed = (digitalRead(BUTTON_PIN) == LOW);
-  if (pressed && !last_btn) {
-    Serial.println("[STRIP] nhan nut -> chup 3 khung POST");
+  bool btn = (digitalRead(BUTTON_PIN) == LOW);
+  if (btn && !last_btn) {
+    Serial.println("Nhan nut -> chup 3 khung, POST tung khung len server");
     for (int i = 0; i < 3; i++) {
+      uint32_t t0 = millis();
       camera_fb_t *fb = esp_camera_fb_get();
+      uint32_t dt = millis() - t0;
       if (!fb) {
-        Serial.printf("[STRIP] khung %d: fb NULL\n", i + 1);
-        redBlink(5, 60, 60);
-      } else {
-        Serial.printf("[STRIP] khung %d: len=%u -> ", i + 1, (unsigned)fb->len);
-        post_frame(fb->buf, fb->len);
-        esp_camera_fb_return(fb);
+        Serial.printf("  Khung %d: fb NULL (doi %lu ms)\n", i + 1, (unsigned long)dt);
+        redBlink(4, 120, 120);
+        delay(400);
+        continue;
       }
-      delay(500);
+      Serial.printf("  Khung %d: %u bytes (doi %lu ms)\n", i + 1,
+                    (unsigned)fb->len, (unsigned long)dt);
+      post_frame(fb->buf, fb->len);
+      esp_camera_fb_return(fb);
+      delay(400);
     }
   }
-  last_btn = pressed;
-  delay(20);
+  last_btn = btn;
+  delay(30);
 }

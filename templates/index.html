@@ -446,18 +446,32 @@ function pollStatus(){
     var cam = d.camera;
     var en = d.engine || {};
     lastEngine = en;
-    $('camDot').className = 'dot' + (cam.connected ? ' on' : '');
-    $('camState').textContent = cam.connected
-      ? 'đang chạy (' + (cam.fps || '?') + ' fps' + (cam.resolution ? ', ' + cam.resolution : '') + ')'
-      : (cam.url ? 'mất kết nối' : 'chưa bật');
+    var esp = d.esp32 || {};
+    var isEspOnline = Boolean(esp.online || esp.push_alive);
+    var isScanning = Boolean(esp.is_scanning);
+    $('camDot').className = 'dot' + (cam.connected || isEspOnline ? ' on' : '');
+    if (isScanning) {
+      $('camState').textContent = 'ESP32 đang quét 15s (nhận ảnh liên tục)';
+    } else if (isEspOnline) {
+      $('camState').textContent = 'ESP32 Online (chế độ chờ — không truyền ảnh)';
+    } else {
+      $('camState').textContent = cam.connected
+        ? 'đang chạy (' + (cam.fps || '?') + ' fps' + (cam.resolution ? ', ' + cam.resolution : '') + ')'
+        : (cam.url ? 'mất kết nối' : 'chưa bật');
+    }
     $('camErr').textContent = cam.error ? ('Lưu ý: ' + cam.error) : '';
     if (cam.url && !$('streamUrl').value) $('streamUrl').value = cam.url;
-    var src = {phone: 'Điện thoại', esp32: 'ESP32', test: 'Test'}[d.frame_source] || 'không có';
+    var src = {phone: 'Điện thoại', esp32: 'ESP32', test: 'Test'}[d.frame_source] || (isEspOnline ? 'ESP32 (chờ)' : 'không có');
     $('srcState').textContent = src;
-    var esp = d.esp32 || {};
     var hint = $('esp32Hint');
     if (hint) {
-      if (esp.push_alive) {
+      if (esp.is_scanning) {
+        hint.textContent = 'ESP32 đang truyền ảnh liên tục trong 15s (đã nhận ' + (esp.push_count || 0) + ' khung) — điểm danh 1 lần.';
+      } else if (esp.online) {
+        hint.textContent = 'ESP32 đang kết nối (Online) — Chế độ chờ: không truyền ảnh. Bấm nút trên ESP32 để quét 15s.'
+          + (esp.rssi != null ? ' · WiFi ' + esp.rssi + ' dBm' : '')
+          + (esp.heap != null ? ' · heap ' + esp.heap : '');
+      } else if (esp.push_alive) {
         hint.textContent = 'ESP32 đang PUSH (' + esp.push_count + ' khung) — nguồn ưu tiên.';
       } else if (d.frame_source === 'esp32') {
         hint.textContent = 'ESP32 đang PULL qua ' + (cam.url || 'STREAM_URL') + '.';
