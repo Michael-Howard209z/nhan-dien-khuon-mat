@@ -275,19 +275,31 @@ def _backfill_attendance(conn):
     """Dựng lịch điểm danh từ nhật ký cũ, để không mất số ngày đã đi học.
 
     Dữ liệu cũ không biết buổi nào -> gán buổi 1 (mặc định).
+
+    QUAN TRỌNG: hàm này chạy MỖI LẦN mở DB nên phải idempotent, và chỉ được
+    đụng vào ngày CHƯA có dòng attendance nào. Khóa chính của `attendance` là
+    (student_id, day, session): nếu buổi hiện tại đã ghi ở session=2 mà vẫn
+    chèn thêm session=1 thì `OR IGNORE` không chặn được (khác khóa) -> sinh
+    dòng trùng lặp. Hậu quả: SUM(hits) bị nhân đôi (6 thay vì 3), danh sách
+    buổi thành [1, 2] và `has_attendance(.., 1)` trả True sai.
     """
     conn.execute(
         """INSERT OR IGNORE INTO attendance (student_id, day, session, first_seen,
                                              last_seen, hits)
-           SELECT student_id,
-                  substr(seen_at, 1, 10),
+           SELECT l.student_id,
+                  substr(l.seen_at, 1, 10),
                   1,
-                  MIN(seen_at),
-                  MAX(seen_at),
+                  MIN(l.seen_at),
+                  MAX(l.seen_at),
                   COUNT(*)
-             FROM recognition_log
-            WHERE student_id IS NOT NULL
-            GROUP BY student_id, substr(seen_at, 1, 10)"""
+             FROM recognition_log l
+            WHERE l.student_id IS NOT NULL
+              AND NOT EXISTS (
+                      SELECT 1 FROM attendance a
+                       WHERE a.student_id = l.student_id
+                         AND a.day = substr(l.seen_at, 1, 10)
+                  )
+            GROUP BY l.student_id, substr(l.seen_at, 1, 10)"""
     )
     conn.commit()
 
