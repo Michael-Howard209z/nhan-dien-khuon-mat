@@ -9,7 +9,9 @@ venv/
 
 # --- Dữ liệu chạy: model tải về, DB và mẫu ảnh khuôn mặt ---
 # (đều được tạo lại tự động, không commit lên git)
-data/
+data/faces/
+data/faces_backup_remote_60
+students.db
 
 # --- Ảnh nhật ký từ các script kiểm tra ---
 out_*.jpg

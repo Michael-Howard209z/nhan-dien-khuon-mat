@@ -972,6 +972,36 @@ static int camWarmup() {
 }
 
 // ============================================================================
+//  TU PHUC HOI: luc boot, OV5640 thuong bi "TREO" (doc duoc PID nhung khong xuat
+//  frame).Nguyen nhan: sensor van con trang thai ngu truoc do nguon cham, hoac
+//  nguon 5V chua on dinh luc init.
+//  Cach khac phuc (da chung minh bang lenh /cam2): cat nguon sensor qua chan
+//  PWDN (HIGH 600ms) -> cap lai (LOW) -> init lai -> 3/3 khung.
+//  Ham nay tu goi khi camWarmup() == 0, khong can nguoi dung go /cam2.
+//  Tra ve so khung co frame sau khi thu lai.
+// ============================================================================
+static int camWarmupRecover() {
+#if defined(PWDN_GPIO_NUM) && (PWDN_GPIO_NUM >= 0)
+  Serial.println("[CAM] 0/3 khung -> THU CAP NGUON LAI SENSOR (PWDN)...");
+  esp_camera_deinit();               // buoc buoc: phai deinit truoc khi init lai
+  g_cam_on = false;
+  digitalWrite(PWDN_GPIO_NUM, HIGH); // TAT nguon sensor
+  delay(600);
+  digitalWrite(PWDN_GPIO_NUM, LOW);  // MO lai
+  delay(300);                        // cho sensor on dinh truoc khi init I2C
+  if (!camWake()) {
+    Serial.println("[CAM] LOI: khong init duoc sensor sau cap nguon lai");
+    return 0;
+  }
+  // Sensor moi cap lai can them thoi gian dong bo hoa (thuong 200-500ms).
+  delay(300);
+  return camWarmup();
+#else
+  return 0;   // board khong co chan PWDN -> khong cap nguon lai duoc
+#endif
+}
+
+// ============================================================================
 //  CHE DO NUT NHAN: poll khong block, debounce, chup 1 anh + POST len server
 // ============================================================================
 #if BUTTON_ENABLE
@@ -1191,8 +1221,9 @@ static void doButtonCapture() {
 #endif
 
   // NONG MAY: doc 3 khung dau tien de KHOI DONG consumer ngay (khong cho
-  // FB-OVF). Neu khong co khung nao -> dung ngay bang 4 nhap.
-  if (camWarmup() == 0) {
+  // FB-OVF). Neu khong co khung nao -> THU CAP NGUON LAI SENSOR (thuong tai
+  // luc boot OV5640 bi treo) -> neu van khong thi dung bang 4 nhap.
+  if (camWarmup() == 0 && camWarmupRecover() == 0) {
     Serial.println("[BTN] camera KHONG xuat frame -> bo qua dot 15s, 4 nhap");
     camPowerReport();   // in nguyen nhan reset truoc do (co the la SAP NGUON)
     btnLed(false);
@@ -1461,6 +1492,12 @@ static void serialHandleCmd(char *line) {
       return;
     }
     int ok = camWarmup();
+    if (ok == 0) {
+      // Luc boot OV5640 thuong bi treo (doc duoc PID nhung khong xuat frame).
+      // Tu cap nguon lai qua PWDN roi thu lai - khong can gao /cam2 nua.
+      ok = camWarmupRecover();
+      Serial.printf("[CAM] KET QUA sau cap nguon lai: %d/3 khung\n", ok);
+    }
     Serial.printf("[CAM] KET QUA: %d/3 khung co frame -> %s\n", ok,
                   ok ? "camera TOT, loi o phan mang/server"
                      : "sensor KHONG xuat frame (loi PHAN CUNG: cap nguon/cao cam)");
