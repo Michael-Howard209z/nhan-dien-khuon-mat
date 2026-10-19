@@ -1,4 +1,4 @@
-# 📷 Server Điểm Danh Khuôn Mặt (ESP32-CAM + Python)
+# Server Điểm Danh Khuôn Mặt (ESP32-CAM + Python)
 
 Hệ thống điểm danh bằng khuôn mặt cho trường học:
 
