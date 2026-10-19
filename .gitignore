@@ -13,7 +13,7 @@ data/
 
 # --- Ảnh nhật ký từ các script kiểm tra ---
 out_*.jpg
-
+*.png
 # --- Log ---
 *.log
 
@@ -22,3 +22,4 @@ opencode.exe
 # --- Trang thai phat trien / ban sao cu (khong commit) ---
 .opencode/
 backup-*/
+t-ch-h-p-server-esp32-cam-v-o-camerawebserver.json
