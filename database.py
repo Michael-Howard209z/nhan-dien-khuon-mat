@@ -34,7 +34,7 @@ _lock = threading.RLock()
 # Giới hạn số dòng của nhật ký sự kiện gần nhất (bảng attendance thì không bị cắt)
 LOG_KEEP = 500
 
-# --------------------------------------------------------------- lịch học / buổi
+#lịch học / buổi
 SESSION_NAMES = {1: "Buổi sáng", 2: "Buổi chiều"}
 
 # Lịch mặc định cho lớp chưa cấu hình: 2 buổi — check-in trước 12:00 tính buổi
@@ -72,7 +72,7 @@ def _tables(conn):
         "SELECT name FROM sqlite_master WHERE type='table'")}
 
 
-# ================================================================== KHỞI TẠO DB
+# KHỞI TẠO DB
 def init_db():
     with _lock, _conn() as conn:
         conn.execute(
@@ -95,7 +95,7 @@ def init_db():
                 seen_at TEXT NOT NULL
             )"""
         )
-        # --- Lớp học: danh mục chính thức + lịch học theo buổi (JSON trong schedule)
+        #Lớp học: danh mục chính thức + lịch học theo buổi (JSON trong schedule)
         conn.execute(
             """CREATE TABLE IF NOT EXISTS classes (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,7 +104,7 @@ def init_db():
                 schedule TEXT NOT NULL DEFAULT ''
             )"""
         )
-        # --- Người dùng GỘP: admin / developer / teacher (đăng nhập 1 chỗ)
+        #Người dùng GỘP: admin / developer / teacher (đăng nhập 1 chỗ)
         conn.execute(
             """CREATE TABLE IF NOT EXISTS users (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,7 +115,7 @@ def init_db():
                 created_at TEXT NOT NULL
             )"""
         )
-        # --- Gán lớp cho giáo viên (teacher_id = users.id)
+        #Gán lớp cho giáo viên (teacher_id = users.id)
         conn.execute(
             """CREATE TABLE IF NOT EXISTS teacher_classes (
                 teacher_id INTEGER NOT NULL,
@@ -123,7 +123,7 @@ def init_db():
                 PRIMARY KEY (teacher_id, class_id)
             )"""
         )
-        # --- Điểm danh theo (học sinh, ngày, BUỔI): không bao giờ bị cắt
+        #Điểm danh theo (học sinh, ngày, BUỔI): không bao giờ bị cắt
         conn.execute(
             """CREATE TABLE IF NOT EXISTS attendance (
                 student_id INTEGER NOT NULL,
@@ -135,7 +135,7 @@ def init_db():
                 PRIMARY KEY (student_id, day, session)
             )"""
         )
-        # --- Ghi chú học sinh nghỉ (lý do)
+        #Ghi chú học sinh nghỉ (lý do)
         conn.execute(
             """CREATE TABLE IF NOT EXISTS absences (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -310,7 +310,7 @@ def normalize_class(name: str) -> str:
     return "".join(parts)
 
 
-# ============================================================ LỊCH HỌC THEO BUỔI
+#LỊCH HỌC THEO BUỔI
 def _parse_time(value, fallback):
     try:
         hh, mm = str(value or "").strip().split(":")
@@ -399,7 +399,7 @@ def current_session(class_name: str, when=None) -> int:
     return 1
 
 
-# ================================================================= HỌC SINH
+#HỌC SINH
 def create_student(full_name: str, date_of_birth: str, class_name: str) -> int:
     full_name = (full_name or "").strip()
     class_name = normalize_class(class_name)
@@ -482,7 +482,7 @@ def set_sample_count(student_id: int, count: int):
         conn.commit()
 
 
-# ================================================================ ĐIỂM DANH
+#ĐIỂM DANH
 def add_log(student_id, full_name, class_name, confidence, when=None):
     """Ghi nhật ký + điểm danh 1 lần cho buổi hiện tại.
 
@@ -558,7 +558,7 @@ def recent_log(limit: int = 30):
         return [dict(r) for r in rows]
 
 
-# ====================================================================== LỚP HỌC
+#LỚP HỌC
 def _count_present(conn, day, class_name=None):
     sql = """SELECT COUNT(DISTINCT a.student_id) AS n
                FROM attendance a JOIN students s ON s.id = a.student_id
@@ -678,7 +678,7 @@ def delete_class(name: str, move_to: str = None):
         return {"name": key, "moved": moved}
 
 
-# =========================================================== TRUY VẤN ĐIỂM DANH
+#TRUY VẤN ĐIỂM DANH
 def attendance_summary(student_id: int):
     """Số ngày đã đi học + chi tiết từng ngày (mới nhất trước).
 
@@ -784,7 +784,7 @@ def recent_attendance_days(days: int = 7):
     return [dict(r) for r in rows]
 
 
-# ======================================================== GHI CHÚ VẮNG / NGHỈ
+#GHI CHÚ VẮNG / NGHỈ
 def set_absence(student_id: int, day: str, reason: str = "", created_by: str = ""):
     """Ghi hoặc sửa ghi chú 'học sinh không điểm danh ngày này'."""
     day = (day or "").strip()
@@ -837,7 +837,7 @@ def absence_map(student_ids, start: str, end: str):
     return out
 
 
-# ================================================= BÁO CÁO NGÀY / TUẦN / THÁNG
+#BÁO CÁO NGÀY / TUẦN / THÁNG
 def _session_states(day: str, students, schedule, when=None, absences=None):
     """Trạng thái từng buổi cho danh sách `students` trong ngày `day`.
 
@@ -962,7 +962,7 @@ def range_report(class_name: str, start: str, end: str):
             "start": start, "end": end, "class_name": normalize_class(class_name)}
 
 
-# ================================================================ NGƯỜI DÙNG
+#NGƯỜI DÙNG
 def _user_row(conn, username: str):
     return conn.execute(
         "SELECT * FROM users WHERE username = ?", ((username or "").strip().lower(),)
@@ -1036,7 +1036,7 @@ def delete_user(user_id: int) -> bool:
         return cur.rowcount > 0
 
 
-# ------------------------------------------------------------- giáo viên (role)
+#giáo viên (role)
 def create_teacher(username: str, password_hash: str, full_name: str, class_names):
     """Tạo tài khoản giáo viên và gán các lớp được dạy."""
     username = (username or "").strip().lower()
@@ -1136,7 +1136,7 @@ def delete_teacher(teacher_id: int) -> bool:
         return False
 
 
-# ================================================================= TỔNG HỢP
+#TỔNG HỢP
 def overview():
     """Số liệu cho trang quản trị: sĩ số lớp, điểm danh hôm nay, 7 ngày gần nhất."""
     today = today_str()

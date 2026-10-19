@@ -29,7 +29,7 @@ ROLES = ("admin", "developer", "teacher")
 ROLE_LABELS = {"admin": "Quản trị", "developer": "Phát triển", "teacher": "Giáo viên"}
 
 
-# ------------------------------------------------------------------- mật khẩu
+#mật khẩu
 def hash_password(password: str) -> str:
     """'pbkdf2$<số vòng>$<muối hex>$<băm hex>'"""
     salt = secrets.token_bytes(16)
@@ -61,7 +61,7 @@ def password_strength_ok(password: str) -> bool:
     return len(password or "") >= 4
 
 
-# ------------------------------------------------------------------- phiên đăng nhập
+#phiên đăng nhập
 def _wipe():
     session.clear()
 
@@ -163,7 +163,7 @@ def can_manage_students() -> bool:
     return is_admin() or is_teacher()
 
 
-# ------------------------------------------------------------------ trang bảo vệ
+#trang bảo vệ
 def deny_page():
     """Đưa người dùng về đúng chỗ: chưa đăng nhập -> trang đăng nhập,
     đã đăng nhập nhưng sai vai trò -> trang của chính vai trò đó."""

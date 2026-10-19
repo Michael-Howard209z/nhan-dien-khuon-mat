@@ -34,7 +34,7 @@ import database as db                                        # noqa: E402
 from face_engine import DEFAULTS, FaceEngine                # noqa: E402
 
 
-# --------------------------------------------------------------------- tiện ích
+#tiện ích
 def stats(values, name, unit):
     if not values:
         print(f"  {name:<22} (không có dữ liệu)")
@@ -49,7 +49,7 @@ def cosine_distance(a, b):
     return float(1.0 - np.dot(a, b))
 
 
-# ------------------------------------------------------------------ offline
+#  offline
 def tune_offline(engine):
     """Khoảng cách nội bộ (cùng người) và liên người, tính từ mẫu đã lưu."""
     m = engine.matcher
@@ -114,7 +114,7 @@ def tune_offline(engine):
     return suggest
 
 
-# ------------------------------------------------------------------- live
+#  live
 def tune_live(engine, url, frames, interval, owner_center):
     """Đo trên luồng camera: in khoảng cách tới ứng viên gần nhất và thứ hai."""
     import requests
@@ -178,7 +178,7 @@ def tune_live(engine, url, frames, interval, owner_center):
     return best.max() if best is not None else None
 
 
-# ---------------------------------------------------------------------- main
+# main
 def main():
     ap = argparse.ArgumentParser(
         description="Đo và gợi ý ngưỡng khớp (MATCH_THRESHOLD / MATCH_MARGIN)")

@@ -62,7 +62,7 @@ def b64(data: bytes) -> str:
     return base64.b64encode(data).decode()
 
 
-# --------------------------------------------------------------- chuẩn hoá ảnh
+# chuẩn hoá ảnh
 def _largest_face_box(img):
     """Tìm mặt lớn nhất bằng YuNet (model chính), Haar dự phòng."""
     model = HERE / "data" / "models" / "face_detection_yunet_2023mar.onnx"
@@ -121,7 +121,7 @@ def _side_by_side(a: bytes, b: bytes) -> bytes:
     return cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 92])[1].tobytes()
 
 
-# ---------------------------------------------- MJPEG server giả lập điện thoại
+# MJPEG server giả lập điện thoại
 class FakePhone(BaseHTTPRequestHandler):
     """Trả ảnh đã chuẩn hoá, xen kẽ 1 khung tối để mô phỏng chớp sáng/mất dặt."""
 
@@ -150,7 +150,7 @@ class FakePhone(BaseHTTPRequestHandler):
 
 
 def main():
-    # ---------------- phiên đăng nhập: admin (cổng PORTAL) + developer (DEBUG)
+    # phiên đăng nhập: admin (cổng PORTAL) + developer (DEBUG)
     admin = requests.Session()
     admin.post(PORTAL + "/dang-nhap", data={"username": "admin",
                                             "password": os.getenv("ADMIN_PASSWORD") or "admin"},

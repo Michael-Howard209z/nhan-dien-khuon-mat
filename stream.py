@@ -93,7 +93,7 @@ class PhoneCamera:
             "frame_count": 0,
         }
 
-    # ------------------------------------------------------------------ public
+    # public
     def set_url(self, url: str, restart: bool = False):
         url = (url or "").strip()
         if url == self._url and not restart:
@@ -120,7 +120,7 @@ class PhoneCamera:
         )
         return st
 
-    # ----------------------------------------------------------------- private
+    # private
     def _mark(self, **kw):
         with self._lock:
             self._state.update(kw)

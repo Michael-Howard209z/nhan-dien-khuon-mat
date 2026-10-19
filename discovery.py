@@ -126,7 +126,7 @@ class DiscoveryService:
         self._last_camera_ip: str | None = None
         self._last_camera_mode: str = ""
 
-    # ------------------------- giao diện dùng ngoài -------------------------
+    #giao diện dùng ngoài 
     @property
     def last_camera_ip(self) -> str | None:
         return self._last_camera_ip
@@ -176,7 +176,7 @@ class DiscoveryService:
         """Goi broadcast ngay (dung khi server vua doi IP)."""
         self._broadcast(self._server_url())
 
-    # ----------------------------- bên trong -------------------------------
+    #bên trong 
     def _server_url(self) -> str:
         # GUI DAY DU endpoint (khong chi host:port): ESP32 dung truc tiep lam
         # push_url. Neu chi gui "http://ip:5001" thi khi nhan vao NVS se MAT

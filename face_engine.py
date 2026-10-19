@@ -30,7 +30,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 import database as db
 
-# ------------------------------------------------------------------ hằng số
+#hằng số
 SFACE_SIZE = (112, 112)          # ảnh chuẩn cho SFace
 LBPH_SIZE = (200, 200)           # ảnh cũ cho LBPH
 
@@ -204,7 +204,7 @@ def _as_sface_input(img: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(img[:, :, :3])
 
 
-# --------------------------------------------------------------------- chữ / vẽ
+# chữ / vẽ
 def draw_text(img, text, org, color, bg=(20, 20, 20), pad=4):
     """Vẽ text (tiếng Việt) lên ảnh BGR, có nền để dễ đọc. color là RGB."""
     draw_labels(img, [(text, org, color)], bg=bg, pad=pad)
@@ -239,7 +239,7 @@ def draw_labels(img, items, bg=(20, 20, 20), pad=4):
     img[:] = cv2.cvtColor(np.array(pil), cv2.COLOR_RGB2BGR)
 
 
-# ------------------------------------------------------------------ phát hiện mặt
+# phát hiện mặt
 @dataclass
 class Detection:
     """Một khuôn mặt tìm thấy trong khung hình."""
@@ -375,7 +375,7 @@ class FaceDetector:
         return out
 
 
-# ------------------------------------------------------------------- so khớp mặt
+# so khớp mặt
 class FaceMatcher:
     """SFace (vector 128 chiều + khoảng cách cosin) nếu có model; không thì LBPH.
 
@@ -413,7 +413,7 @@ class FaceMatcher:
         if self._sf is None:
             self._lbph = _new_lbph()
 
-    # ------------------------------------------------------- trích đặc trưng
+    # trích đặc trưng
     def align(self, bgr: np.ndarray, landmarks) -> np.ndarray:
         """Căn mặt về 112x112 theo điểm mốc (sf.alignCrop của OpenCV)."""
         if self._sf is None or landmarks is None:
@@ -435,7 +435,7 @@ class FaceMatcher:
         aligned = self.align(bgr, landmarks)
         return None if aligned is None else self.embed(aligned)
 
-    # ------------------------------------------------------------------ huấn luyện
+    # huấn luyện
     @property
     def trained(self) -> bool:
         return self._trained
@@ -515,7 +515,7 @@ class FaceMatcher:
         """Ngưỡng áp dụng cho 1 người (có ngưỡng riêng nếu đủ mẫu)."""
         return float(self.per_person.get(sid, self.threshold))
 
-    # -------------------------------------------------------------------- so khớp
+    # so khớp
     def rank_for(self, emb: np.ndarray):
         """Xếp hạng mọi người theo khoảng cách nhỏ nhất tới mẫu của họ.
 
@@ -547,7 +547,7 @@ class FaceMatcher:
             label, dist = self._lbph.predict(cv2.resize(gray, LBPH_SIZE))
         return int(label), float(dist)
 
-    # --------------------------------------------------------------------- thống kê
+    # thống kê
     def info(self) -> dict:
         with self._lock:
             return {
@@ -560,7 +560,7 @@ class FaceMatcher:
             }
 
 
-# ---------------------------------------------------------------------- theo dõi
+# theo dõi
 @dataclass(eq=False)   # eq=False để track dùng được làm khoá dict (định danh theo object)
 class _Track:
     """Một khuôn mặt đang được theo dõi qua nhiều khung hình."""
@@ -622,7 +622,7 @@ class FaceTracker:
         self._factory = _tracker_factory(self.cfg["track_backend"])
         self.reset()
 
-    # ------------------------------------------------------------------ tiện ích
+    # tiện ích
     def _init_tracker(self, frame, box):
         """Tạo tracker khi cần. Không tạo sẵn: khởi tạo tracker khá tốn CPU."""
         if self._factory is None or frame is None:
@@ -666,7 +666,7 @@ class FaceTracker:
         nsx, nsy, nside = square_box(nx, ny, nw, nh, pad=float(self.cfg["square_pad"]))
         t.sq = (sx + (nsx - sx) * a, sy + (nsy - sy) * a, side + (nside - side) * a)
 
-    # ------------------------------------------------------------------ vòng lặp
+    # vòng lặp
     def update(self, dets, embs, frame) -> list:
         """Ghép detect mới vào track cũ. `embs[i]` có thể None (tiết kiệm CPU)."""
         cfg = self.cfg
@@ -745,7 +745,7 @@ class FaceTracker:
         self.tracks = alive
         return self.tracks
 
-    # ------------------------------------------------------------------ quyết định
+    # quyết định
     @staticmethod
     def vote(t: _Track, sid, dist, gap, need: int):
         """Chốt tên ổn định theo thời gian để nhãn không nhấp nháy."""
@@ -784,7 +784,7 @@ class FaceTracker:
         return None, False
 
 
-# ------------------------------------------------------------------------ engine
+# engine
 class FaceEngine:
     """Điểm vào cho server: nhận khung hình -> phát hiện -> nhận dạng -> vẽ."""
 
@@ -801,7 +801,7 @@ class FaceEngine:
         # sẽ quên hết mọi người đã đăng ký
         self.retrain()
 
-    # ------------------------------------------------------------------- cấu hình
+    # cấu hình
     @property
     def threshold(self) -> float:
         return self.matcher.threshold
@@ -881,7 +881,7 @@ class FaceEngine:
             **self.matcher.info(),
         }
 
-    # ------------------------------------------------------------------- phát hiện
+    # phát hiện
     def _detect(self, frame, for_sample: bool = False):
         """Detector trên ảnh đã đưa về bề rộng chuẩn; kết quả trong toạ độ khung gốc.
 
@@ -909,7 +909,7 @@ class FaceEngine:
         crop = gray[max(0, y):y + h, max(0, x):x + w]
         return float(cv2.Laplacian(crop, cv2.CV_64F).var()) if crop.size >= 64 else 0.0
 
-    # ------------------------------------------------------------------- so khớp
+    # so khớp
     def _resolve_frame(self, per_track):
         """Chọn sao cho mỗi track trong khung: gần nhất thắng, mỗi người chỉ 1 ô.
 
@@ -975,7 +975,7 @@ class FaceEngine:
             out.update(extra)
         return out
 
-    # ------------------------------------------------------------------- xử lý
+    # xử lý
     def process(self, frame, draw: bool = True, track: bool = True):
         """Xử lý một khung hình. Trả về (kết quả, ảnh).
 
@@ -1074,7 +1074,7 @@ class FaceEngine:
                        "blur": round(self._blur_of(gray, d.box), 1) if gray is not None else None}))
         return results
 
-    # ------------------------------------------------------------------------ vẽ
+    # vẽ
     def draw_results(self, frame, results):
         """Vẽ ô vuông đã làm mượt + nhãn tiếng Việt."""
         h, w = frame.shape[:2]
@@ -1120,7 +1120,7 @@ class FaceEngine:
         draw_labels(frame, labels, pad=pad)
         return frame
 
-    # --------------------------------------------------------------------- mẫu
+    # mẫu
     def _candidate_faces(self, bgr):
         """Mọi mặt trong ảnh, kèm điểm chọn.
 

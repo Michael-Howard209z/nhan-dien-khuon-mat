@@ -69,7 +69,7 @@ for _a in (cam_app, portal):
     _a.config["MAX_CONTENT_LENGTH"] = 20 * 1024 * 1024  # 20 MB
 
 
-# ------------------------------------------------------------------- .env
+# .env
 def save_env(**updates):
     """Ghi biến cấu hình vào file .env (giữ nguyên các biến/dòng khác)."""
     # Đọc bằng utf-8-sig để bỏ BOM, ghi bằng utf-8 (không BOM) cho sạch.
@@ -115,7 +115,7 @@ for _a in (cam_app, portal):
     _a.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax")
 
 
-# ------------------------------------------------------------------- .env
+#.env
 def _env_number(name, default, cast=float):
     raw = (os.getenv(name) or "").strip()
     try:
@@ -177,7 +177,7 @@ if threshold_migrated:
     engine.threshold = SETTINGS["match_threshold"]
 
 
-# ------------------------------------------------------ tài khoản hệ thống seed
+# tài khoản hệ thống seed
 ADMIN_PASSWORD = (os.getenv("ADMIN_PASSWORD") or "admin").strip()
 DEV_PASSWORD = (os.getenv("DEV_PASSWORD") or "developer").strip()
 DEV_USERNAME = (os.getenv("DEV_USERNAME") or "developer").strip().lower()
@@ -216,7 +216,7 @@ def _handle_error(exc):
     return "Lỗi server", 500
 
 
-# ------------------------------------------------- đường dẫn qua lại giữa 2 cổng
+# đường dẫn qua lại giữa 2 cổng
 @cam_app.context_processor
 @portal.context_processor
 def _inject_links():
@@ -243,7 +243,7 @@ def _home_path() -> str:
     return "/"
 
 
-# ------------------------------------------------------------------ frame hub
+# frame hub
 hub_lock = threading.Lock()
 hub = {"frame": None, "ts": 0.0, "source": "none"}
 out_lock = threading.Lock()
@@ -504,7 +504,7 @@ def on_phone_frame(frame):
 camera = PhoneCamera(on_frame=on_phone_frame)
 
 
-# --------------------------------------------------------------------- helpers
+# helpers
 def decode_image(payload):
     """Nhận bytes / base64 / data-URL -> ảnh BGR (None nếu lỗi)."""
     if payload is None:
@@ -624,7 +624,7 @@ def _valid_date(value, fallback=None):
     return d or (fallback or db.today_str())
 
 
-# ================================================================= CỔNG DEBUG
+# CỔNG DEBUG
 # Chỉ TÀI KHOẢN DEVELOPER mới xem/điều khiển được trang camera (preview là công
 # cụ debug, không phải luồng điểm danh). Ngoại lệ: /api/ping (sức khoẻ),
 # /api/esp32/heartbeat (kiểm tra hoạt động), /api/esp32/frame (ESP32 gửi ảnh 15s).
@@ -746,7 +746,7 @@ def api_raw_frame():
     return resp
 
 
-# ------------------------------------------------------------------ cấu hình (.env)
+# cấu hình (.env)
 CONFIG_KEYS = (
     "stream_url",
     "process_fps",
@@ -856,7 +856,7 @@ def set_config():
     )
 
 
-# ---------------------------------------------------------------------- status
+# status
 @cam_app.get("/api/status")
 def status():
     st = camera.status()
@@ -893,7 +893,7 @@ def status():
     )
 
 
-# ------------------------------------------------------- APIs dùng chung PORTAL
+# APIs dùng chung PORTAL
 # (sinh viên/học sinh, lớp, giáo viên...) — đăng nhập theo vai trò, không mở
 # trên cổng debug.
 @portal.get("/api/students")
@@ -1073,7 +1073,7 @@ def api_reset_face(sid):
     return jsonify({"ok": True, "student": db.get_student(sid)})
 
 
-# -------------------------------------------------------------------- recognize
+# recognize
 @cam_app.post("/api/recognize")
 def api_recognize():
     """Nhận diện MỘT ảnh độc lập (debug): không tracking -> kết quả tái lập.
@@ -1091,7 +1091,7 @@ def api_recognize():
     return jsonify(resp)
 
 
-# ------------------------------------------------------------------ esp32 frame
+# esp32 frame
 @cam_app.post("/api/esp32/frame")
 def api_esp32_frame():
     """Nhận khung hình từ ESP32-CAM.
@@ -1204,7 +1204,7 @@ def api_esp32_status():
     })
 
 
-# ------------------------------------------------- proxy cài đặt ESP32-CAM
+# proxy cài đặt ESP32-CAM
 def esp32_base_url():
     """Địa chỉ web của ESP32-CAM (luôn cổng 80, dạng http://<ip>/) hoặc None.
 
@@ -1331,13 +1331,13 @@ def api_esp32_live():
     return jsonify({"ok": True, "state": int(state), "esp32": data})
 
 
-# -------------------------------------------------------------------------- log
+# log
 @cam_app.get("/api/log")
 def api_log():
     return jsonify({"ok": True, "log": db.recent_log(request.args.get("limit", 30, type=int))})
 
 
-# ============================================================ TIỆN ÍCH DÙNG CHUNG
+# TIỆN ÍCH DÙNG CHUNG
 def month_range(month: str):
     """'2026-10' -> (ngày đầu, ngày cuối, danh sách ngày). Sai định dạng -> tháng này."""
     month = (month or "").strip()
@@ -1459,7 +1459,7 @@ def system_info():
     }
 
 
-# ========================================================= PORTAL: ĐĂNG NHẬP
+# PORTAL: ĐĂNG NHẬP
 ROLE_TABS = {
     # (khoá tab, biểu tượng, nhãn) — thứ tự hiển thị trên thanh tab
     "admin": [
@@ -1523,7 +1523,7 @@ def to_debug():
                     f":{SETTINGS['camera_port']}/")
 
 
-# ============================================================ TRANG QUẢN LÝ
+# TRANG QUẢN LÝ
 def _my_classes():
     """Danh sách lớp mà người dùng hiện tại được phép thao tác."""
     if auth.is_admin():
@@ -1683,7 +1683,7 @@ def quan_ly():
     return render_template("portal.html", **ctx)
 
 
-# ====================================================================== API LỚP
+# API LỚP
 @portal.get("/api/classes")
 @auth.require_teacher
 def api_list_classes():
@@ -1739,7 +1739,7 @@ def api_delete_class(name):
     return jsonify({"ok": True, "deleted": out, "classes": db.list_classes()})
 
 
-# ================================================================== API GIÁO VIÊN
+# API GIÁO VIÊN
 @portal.post("/api/teachers")
 @auth.require_admin
 def api_create_teacher():
@@ -1786,7 +1786,7 @@ def api_delete_teacher(tid):
     return jsonify({"ok": True, "teachers": db.list_teachers()})
 
 
-# =============================================================== ĐIỂM DANH / XEM
+# ĐIỂM DANH / XEM
 @portal.get("/api/students/<int:sid>/attendance")
 @auth.require_teacher
 def api_student_attendance(sid):
@@ -1799,7 +1799,7 @@ def api_student_attendance(sid):
                     "attendance": db.attendance_summary(sid)})
 
 
-# ============================================================ GHI CHÚ VẮNG / NGHỈ
+# GHI CHÚ VẮNG / NGHỈ
 @portal.post("/api/absences")
 @auth.require_teacher
 def api_set_absence():
@@ -1834,7 +1834,7 @@ def api_clear_absence():
     return jsonify({"ok": True})
 
 
-# ================================================================ BÁO CÁO / CSV
+# BÁO CÁO / CSV
 def _report_or_deny():
     """Xây report cho request báo cáo + kiểm quyền lớp. Trả (report, None) hoặc
     (None, response_lỗi)."""
@@ -1901,7 +1901,7 @@ def api_overview():
     return jsonify({"ok": True, **db.overview()})
 
 
-# ----------------------------------------------------------------------- start
+# start
 def _on_discovered_camera(ip: str, mode: str) -> None:
     """UDP discovery gọi tới: vừa biết IP camera (có thể CHƯA có HTTP nào tới)."""
     # Không đè IP học được từ heartbeat (heartbeat là nguồn "chính chủ" hơn).

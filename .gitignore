@@ -1,27 +1,19 @@
 # --- Cấu hình riêng của máy này: có mật khẩu quản trị + khoá cookie đăng nhập ---
 .env
-
-# --- Python ---
 __pycache__/
 *.py[cod]
 .venv/
 venv/
-
-# --- Dữ liệu chạy: model tải về, DB và mẫu ảnh khuôn mặt ---
-# (đều được tạo lại tự động, không commit lên git)
 data/faces/
 data/faces_backup_remote_60
 students.db
 
-# --- Ảnh nhật ký từ các script kiểm tra ---
+
 out_*.jpg
 *.png
 # --- Log ---
 *.log
-
-# --- Nhị phân công cụ lạ vô tình nằm trong thư mục dự án ---
 opencode.exe
-# --- Trang thai phat trien / ban sao cu (khong commit) ---
 .opencode/
 backup-*/
 t-ch-h-p-server-esp32-cam-v-o-camerawebserver.json

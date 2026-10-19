@@ -49,7 +49,7 @@ def html(sess, url, **kw):
     return sess.get(BASE + url, timeout=15, allow_redirects=False, **kw)
 
 
-# ---------------------------------------------------------------- dữ liệu thử
+# dữ liệu thử
 db.init_db()
 sid_a = db.create_student("Học Sinh Thử Ngày", "2008-01-01", "ZZTEST")
 sid_b = db.create_student("Học Sinh Thử Lớp", "2008-02-02", "ZZKHAC")
@@ -71,7 +71,7 @@ gv = requests.Session()
 dev = requests.Session()
 
 try:
-    # ============================ MỘT TRANG ĐĂNG NHẬP DUY NHẤT =================
+    # MỘT TRANG ĐĂNG NHẬP DUY NHẤT 
     r = requests.get(BASE + "/", timeout=15, allow_redirects=False)
     check("cổng PORT / là trang đăng nhập DUY NHẤT (username + password)",
           r.status_code == 200 and "Đăng nhập hệ thống" in r.text
@@ -102,7 +102,7 @@ try:
     check("cổng camera API cần đăng nhập developer (401)",
           r.status_code == 401, r.status_code)
 
-    # ================================================================= đăng nhập
+    # đăng nhập
     r = admin.post(BASE + "/dang-nhap", data={"username": "admin", "password": "sai"},
                    timeout=15, allow_redirects=False)
     check("sai mật khẩu bị từ chối (200 + thông báo lỗi)",
@@ -125,7 +125,7 @@ try:
           r.status_code == 302 and "/quan-ly" in r.headers.get("Location", ""),
           f"{r.status_code} {r.headers.get('Location')}")
 
-    # =================================================================== admin
+    # admin
     tabs = ("tong-quan", "dang-ky", "hom-nay", "diem-danh",
             "bao-cao", "lop", "giao-vien", "he-thong")
     bad = [t for t in tabs if html(admin, f"/quan-ly?tab={t}").status_code != 200]
@@ -182,7 +182,7 @@ try:
           r.status_code == 200 and "Tổng học sinh" in r.text
           and "Con tôi" not in r.text)
 
-    # ============================================================== API lớp/lịch
+    # API lớp/lịch
     r = admin.post(BASE + "/api/classes", json={"name": " zz moi "}, timeout=15)
     check("thêm lớp qua API (tự chuẩn hoá)", r.status_code == 200
           and r.json()["class"]["name"] == "ZZMOI", r.text[:120])
@@ -226,7 +226,7 @@ try:
           and "text/csv" in r.headers.get("Content-Type", ""),
           f"{r.status_code} {r.headers.get('Content-Type')}")
 
-    # ============================================================== giáo viên
+    # giáo viên
     r = admin.post(BASE + "/api/teachers",
                    json={"username": "thu_nghiem", "password": "1234",
                          "full_name": "Cô Thử Nghiệm", "classes": ["ZZTEST"]},
@@ -330,7 +330,7 @@ try:
                "&end=2026-10-09", timeout=15)
     check("giáo viên tải được CSV báo cáo", r.status_code == 200, r.status_code)
 
-    # =============================================================== developer
+    # developer
     r = dev.post(BASE + "/dang-nhap",
                  data={"username": DEV_USER, "password": DEV_PASS},
                  timeout=15, allow_redirects=False)
@@ -355,7 +355,7 @@ try:
     check("developer trên cổng camera vẫn không có trang quản lý",
           r.status_code in (302, 303, 404), r.status_code)
 
-    # ============================================================ không phụ huynh
+    # không phụ huynh
     with db._conn() as _c:
         cols = [row[1] for row in _c.execute("PRAGMA table_info(students)")]
         tables = [row[0] for row in _c.execute(
@@ -366,14 +366,14 @@ try:
     check("module database không còn hàm phụ huynh",
           not any("parent" in n for n in dir(db)))
 
-    # ================================================================ đăng xuất
+    #đăng xuất
     r = gv.post(BASE + "/dang-xuat", timeout=15, allow_redirects=False)
     check("đăng xuất được", r.status_code == 302)
     r = html(gv, "/quan-ly")
     check("sau đăng xuất thì bị chặn", r.status_code == 302)
 
 finally:
-    # --------------------------------------------------------------- dọn dẹp
+    # dọn dẹp
     for s in (sid_a, sid_b):
         try:
             admin.delete(BASE + f"/api/students/{s}", timeout=15)
