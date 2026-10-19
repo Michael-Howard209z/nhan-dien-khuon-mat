@@ -1,4 +1,4 @@
-// ============================================================================
+﻿// ============================================================================
 //  ESP32-CAM + SERVER NHAN DIEN KHUON MAT (Python, thu muc goc du an)
 // ----------------------------------------------------------------------------
 //  Firmware nay = mau CameraWebServer cua Espressif + them che do PUSH khung
@@ -39,11 +39,13 @@
 #include "esp_camera.h"
 #include "esp_log.h"             // esp_log_level_set: mo log driver camera khi chan doan fb NULL
 #include <WiFi.h>
+#include <esp_system.h>          // esp_reset_reason: phat hien board bi SAP NGUON (brownout)
 #include <WiFiClient.h>
 #include <WiFiClientSecure.h>
 #include <DNSServer.h>          // captive portal: phan moi ten ve IP cua minh khi o AP
 #include <esp_heap_caps.h>
 #include "app_config.h"         // cau hinh persistent (NVS): WiFi, IP tinh, server, huong cam
+#include <WiFiUdp.h>            // phat hien server qua UDP broadcast (khong can IP server)
 
 // ===========================
 // Select camera model in board_config.h
@@ -54,8 +56,8 @@
 // WiFi MAC DINH (chi dung khi LAN DAU chua co gi trong NVS).
 // Sau nay sua tren trang web /setup (khong can code lai).
 // ===========================
-const char *ssid = "Free_Wifi";
-const char *password = "0559649707";
+const char *ssid = "Test";
+const char *password = "88888888";
 
 // ============================================================================
 //  CHE DO AP CAU HINH
@@ -93,7 +95,13 @@ static DNSServer dnsServer;
 // ==================================================================
 #define BUTTON_ENABLE     1       // 1 = che do nut nhan (cam OFF khi nghi, nhan nut = truyen anh 15s)
                                   // 0 = quay lai che do cu (PULL/PUSH lien tuc, cam luon bat)
-#define FW_VERSION "2026-10-12-fbovf-logfix"  // in ra Serial luc boot de biet board dang chay ban nao
+#define FW_VERSION "2026-10-19-udp-discovery"  // in ra Serial luc boot de biet board dang chay ban nao
+// --- Tu tim IP server qua UDP broadcast (xem them o phan DISC duoi day) ---
+//  1 = MOI (khuyen dung): server phat "FACESYNC|SERVER|http://ip:5001" ra mang,
+//      ESP32 tu doi URL khi server doi IP. Khong anh huong gi den camera.
+//  0 = TAT (chi de so sanh chan doan): neu nghi code moi gay loi camera thi tat
+//      di, nap lai va bam nut. Camera van NULL thi LOI KHONG PHAI o discovery.
+#define DISCOVERY_ENABLE  1
 #define BUTTON_PIN       13     // GPIO13, INPUT_PULLUP: nut nhan noi GPIO13 -> GND, nhan xuong = muc THAP (active LOW)
 //  Sao khong dung cac chan khac:
 //   - GPIO12 (MTDI): strapping pin. Nut keo LOW luc boot se doi thanh suc
@@ -163,6 +171,188 @@ static void heartbeatPoll();                       // duy tri ket noi (khong tru
 
 static void serialPoll();   // lenh Serial (/url, /help): doi URL server khong can nap lai
 
+// ---------------- Tu tim IP server qua UDP broadcast ----------------
+static uint32_t g_last_hb_ok_ms = 0;   // lan heartbeat thanh cong gan nhat
+                                       // (dung cho ca discovery va chan doan)
+#if DISCOVERY_ENABLE
+//  Boi vi: IP may chay server co the doi (DHCP), luc do ESP32 "bi mat" server
+//  vi url cu trong NVS tro toi IP da khong con. Cach khac phuc:
+//   + Server (Python) moi 5s gui 1 goi UDP broadcast "FACESYNC|SERVER|http://ip:5001"
+//     ra cong 4321 (di ra ngoai -> khong bi Windows Firewall chan).
+//   + ESP32 lang nghe; neu hien dang OFFLINE roi nghe thay url khac thi doi sang url
+//   + ESP32 cung gui "FACESYNC|DISCOVER" khi offline (server tra loi truc tiep) va
+//     "FACESYNC|ESP32|<ip>|<mode>" de server biet ip camera (de nghi uu tien: rule
+//     cho phep UDP 4321 den may chay server).
+#define DISC_PORT 4321
+#define DISC_MAGIC "FACESYNC"
+#define DISC_MIN_GAP_MS 5000    // it nhat 5s moi lan gui DISCOVER khi offline
+static WiFiUDP g_discUdp;
+static bool g_discOn = false;
+static uint32_t g_discLastSend = 0;   // lan GUI di (DISCOVER/ANNOUNCE) gan nhat
+static uint32_t g_discLastInfo = 0;   // lan gui "minh la ESP32 nao" cho server
+
+// Trang thai nay duoc KHAI BAO duoi (phan bien toan cuc) - o day chi la khai
+// bao truoc (forward declaration) vi ham discovery dung chung.
+extern volatile bool g_server_online;
+extern volatile bool g_is_scanning;
+extern volatile uint32_t g_last_heartbeat_ms;
+
+static const char *discModeName() {
+#if BUTTON_ENABLE
+  return "button";
+#elif PUSH_ENABLE
+  return "push";
+#else
+  return "pull";
+#endif
+}
+
+static void discSend(const char *payload) {
+  if (!g_discOn || WiFi.status() != WL_CONNECTED) return;
+  uint32_t now = millis();
+  if (g_discLastSend && (now - g_discLastSend) < DISC_MIN_GAP_MS) return;  // han che do nhieu
+  g_discLastSend = now;
+  if (g_discUdp.beginPacket("255.255.255.255", DISC_PORT)) {   // broadcast toan mang
+    g_discUdp.print(payload);
+    g_discUdp.endPacket();
+  }
+}
+
+// Gui khong ton han che 5s (dung rieng cho luc boot).
+static void discSendNow(const char *payload) {
+  g_discLastSend = 0;
+  discSend(payload);
+}
+
+// Server dang bao: "minh la http://<ip>:5001[/api/esp32/frame]" -> neu ESP32 dang
+// OFFLINE va url khac url hien tai thi chuyen sang url moi (luu NVS).
+static void discOnServerUrl(const char *url) {
+  if (!url || !*url) return;
+
+  // CHAN DOAN: server co the chi gui "http://ip:port" (ban server cu / server
+  // khac). Neu bo nguyen vao NVS thi se MAT duong dan "/api/esp32/frame" ->
+  // POST anh loi 404 ma heartbeat van ONLINE (vi heartbeat dung path co dinh)
+  // -> rat kho phat hien. Vao day: neu thieu path thi them vao.
+  char fixed[96];
+  const char *p = strstr(url, "://");           // bo qua "http://"
+  const char *path = p ? strchr(p + 3, '/') : strchr(url, '/');
+  if (!path || path[1] == '\0') {               // khong co path (hoac chi "/")
+    size_t n = strlen(url);
+    while (n > 0 && url[n - 1] == '/') n--;      // bo dau "/" cuoi neu co
+    snprintf(fixed, sizeof(fixed), "%.*s/api/esp32/frame", (int)n, url);
+    Serial.printf("[DISC] Server gui thieu duong dan -> bo sung: %s\n", fixed);
+    url = fixed;
+  }
+
+  if (strcmp(url, cfg.push_url) == 0) return;         // khong doi gi
+
+  // Chi doi khi dang mat ket noi (khong lam gian doan phien dang chay tot).
+  // "Chua tung online" (g_last_heartbeat_ms==0) van cho phep -> chay tot tu boot.
+  //
+  // NGOAI LE QUAN TRONG: neu url HIEN TAI dang thieu duong dan API thi no VAN
+  // "online" (heartbeat dung path co dinh) nhung POST anh se loi 404 -> phai
+  // cho phep doi NGAY, khong doi qua trang thai online.
+  {
+    const char *cur = cfg.push_url;
+    const char *cp = strstr(cur, "://");
+    const char *cpath = cp ? strchr(cp + 3, '/') : strchr(cur, '/');
+    bool cur_path_ok = (cpath && cpath[1] != '\0');
+    if (g_last_heartbeat_ms != 0 && g_server_online && cur_path_ok) {
+      Serial.printf("[DISC] Nghe server %s nhung dang online -> giu %s\n", url, cur);
+      return;
+    }
+  }
+
+  Serial.printf("[DISC] Tim thay server moi: %s (cu: %s)\n", url,
+                cfg.push_url[0] ? cfg.push_url : "(mac dinh)");
+  strncpy(cfg.push_url, url, sizeof(cfg.push_url) - 1);
+  cfg.push_url[sizeof(cfg.push_url) - 1] = '\0';
+  cfg_save();                                            // luu NVS -> boot lai van dung
+  push_parse_url();                                      // nhan lai host/port/path moi
+  if (g_server_online) g_server_online = false;          // cho heartbeat thu lai ngay
+}
+
+// Doc goi tin server gui (khong chan): "FACESYNC|SERVER|http://..."
+static void discRx() {
+  for (int i = 0; i < 4; i++) {                          // toi da 4 goi moi lan poll
+    int n = g_discUdp.parsePacket();
+    if (n <= 0) break;
+    char buf[128];
+    int len = g_discUdp.read(buf, sizeof(buf) - 1);
+    if (len <= 0) continue;
+    buf[len] = '\0';
+    if (strncmp(buf, DISC_MAGIC "|", strlen(DISC_MAGIC) + 1) != 0) continue;
+    const char *body = buf + strlen(DISC_MAGIC) + 1;
+    if (strncmp(body, "SERVER|", 7) == 0) discOnServerUrl(body + 7);
+  }
+}
+
+static void discPoll() {
+  if (!g_discOn || WiFi.status() != WL_CONNECTED) return;
+
+  // 1) Nhan tin server (neu co)
+  discRx();
+
+  // 2) Van de: dang OFFLINE qua lau -> hoi toan mang "ai la server?"
+  //    (cai nay chi can khi server chua broadcast duoc, vi vay nen co 2 huong).
+  uint32_t now = millis();
+  if (!g_server_online && !g_is_scanning &&
+      (g_last_hb_ok_ms == 0 || (now - g_last_hb_ok_ms) > 10000)) {
+    char msg[96];
+    snprintf(msg, sizeof(msg), DISC_MAGIC "|DISCOVER|%s", discModeName());
+    discSend(msg);
+  }
+}
+
+// Luc BOOT (WiFi vua len): hoi toan mang NGAY vai lan, moi lan nghe ~700ms.
+// Neu server phan hoi thi URL dung tu dau, khong can cho 5-15s nhu khi rung.
+// Tra ve true = da nghe thay server (url da duoc discOnServerUrl cap nhat).
+static bool discBootBurst() {
+  if (!g_discOn || WiFi.status() != WL_CONNECTED) return false;
+  char msg[96];
+  snprintf(msg, sizeof(msg), DISC_MAGIC "|DISCOVER|%s", discModeName());
+  for (int i = 0; i < 3; i++) {
+    discSendNow(msg);
+    char before[sizeof(cfg.push_url)];
+    strncpy(before, cfg.push_url, sizeof(before) - 1);   // ban sao DE SO SANH
+    before[sizeof(before) - 1] = '\0';
+    uint32_t t0 = millis();
+    while (millis() - t0 < 700) {        // cho server tra loi 700ms
+      discRx();
+      if (strcmp(cfg.push_url, before) != 0) return true;   // da doi URL
+      delay(5);
+    }
+  }
+  return false;
+}
+
+// Bao voi server "minh la ESP32 <ip> o che do <mode>" -> server biet ip camera
+// ngay ca khi ESP32 CHUA gui duoc HTTP (vi sai url server). Gui 15s/lan.
+static void discInfoPoll() {
+  if (!g_discOn || WiFi.status() != WL_CONNECTED) return;
+  uint32_t now = millis();
+  if (g_discLastInfo && (now - g_discLastInfo) < 15000) return;
+  g_discLastInfo = now;
+  char msg[80];
+  snprintf(msg, sizeof(msg), DISC_MAGIC "|ESP32|%s|%s",
+           WiFi.localIP().toString().c_str(), discModeName());
+  discSend(msg);   // van ton trong DISC_MIN_GAP_MS -> khong gay nheu
+}
+
+// Mo cong UDP phat hien (goi sau khi WiFi da ket noi).
+static void discBegin() {
+  if (cfg_setup_mode) return;   // AP cau hinh thi khong phat hien gi
+  g_discOn = (g_discUdp.begin(DISC_PORT) == 1);
+  Serial.printf("[DISC] UDP port %d: %s (server broadcast -> ESP32 tu doi URL)\n",
+                DISC_PORT, g_discOn ? "san sang" : "KHONG mo duoc");
+}
+#else  // !DISCOVERY_ENABLE - khong co code discovery (chi de chan doan)
+static void discPoll() {}
+static void discInfoPoll() {}
+static void discBegin() {}
+static bool discBootBurst() { return false; }
+#endif  // DISCOVERY_ENABLE
+
 // ---------------- Trang thai push va heartbeat ----------------
 volatile int g_push_state = 0;      // 0 = chua ket noi/dang lai, 1 = dang day
 volatile uint32_t g_push_ok = 0;    // so khung gui thanh cong
@@ -170,8 +360,7 @@ volatile uint32_t g_push_err = 0;   // so khung loi
 const char *g_push_url = PUSH_URL;   // se tro sang cfg.push_url sau cfg_load() trong setup()
 volatile bool g_server_online = false; // true = server Python dang phan hoi heartbeat (online)
 volatile bool g_is_scanning = false;   // true = dang trong dot truyen anh 15 giay
-static uint32_t g_last_heartbeat_ms = 0;
-
+volatile uint32_t g_last_heartbeat_ms = 0;   // khong static: ham discovery doc duoc
 // ---------------- Trang thai camera (doc tu app_httpd.cpp) ----------------
 volatile bool g_cam_on = false;         // true = camera da init (che do nguoc: OFF khi nghi)
 volatile bool g_stream_active = false;  // true = stream :81 dang chay (chi de hien thi, camSleep hien la no-op)
@@ -232,7 +421,7 @@ static Client *push_client() {
 
 // Ket noi voi timeout ngan (2s): tranh treo task hang giay khi server chet/sai IP.
 // Chu y: lop goc Client* CHI CO ban connect() 2 doi so. Goi ban 3 doi so
-// (them timeout) truc tiep qua con tro Client* se LOI bien dich — phai cast ve
+// (them timeout) truc tiep qua con tro Client* se LOI bien dich â€” phai cast ve
 // lop cu the. WiFiClient co ban connect(host, port, timeout); HTTPS dung ban
 // 2 doi so cho chac chan.
 static bool push_connect(Client *c) {
@@ -539,7 +728,7 @@ static void push_task(void *arg) {
 #else
     // ---- Che do anh tung khung: moi khung 1 POST rieng ----
     // Backoff 3s khi server chet/sai IP: connect() blocking hang giay, thu moi
-    // khung (10fps) se treo task + spam Serial -> ca stream noi bo (:81) cũng lag.
+    // khung (10fps) se treo task + spam Serial -> ca stream noi bo (:81) cÅ©ng lag.
     if (now < next_retry) { vTaskDelay(100 / portTICK_PERIOD_MS); continue; }
     c = push_client();
     if (!push_connect(c)) {  // timeout 2s cho HTTP, khong doi mac dinh
@@ -718,6 +907,44 @@ void camSleep() {
 }
 
 // ============================================================================
+//  CHAN DOAN NGUON: ESP32 co the RESET vi SAP NGUON (brownout) khi camera +
+//  WiFi dong luc tren nguon yeu. Neu lan boot truoc bi brownout thi day la
+//  NGUYEN NHANso 1 giai thich vi sao sensor doc duoc PID nhung khong xuat frame
+//  (sensor can dong lon hon khi bat dau stream -> nguon rot -> sensor khoi
+//  dong lai khong day du -> khong co khung, trong khi I2C van doc duoc).
+// ============================================================================
+static const char *resetReasonName() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   return "BAT NGUON (nguon moi duoc cam vao)";
+    case ESP_RST_EXT:       return "RESET BEN NGOAI (chan RESET)";
+    case ESP_RST_SW:        return "RESET PHAN MEM (reboot)";
+    case ESP_RST_PANIC:     return "CRASH / PANIC (phan mem roi)";
+    case ESP_RST_INT_WDT:   return "WATCHDOG NGAT (treo ngat)";
+    case ESP_RST_TASK_WDT:  return "WATCHDOG TASK (treo task)";
+    case ESP_RST_WDT:       return "WATCHDOG (treo)";
+    case ESP_RST_DEEPSLEEP: return "THUC DAY TU SLEEP";
+    case ESP_RST_BROWNOUT:  return "SAP NGUON (BROWNOUT) - NGUON YEU!";
+    case ESP_RST_SDIO:      return "SDIO";
+    case ESP_RST_USB:       return "USB";
+    default:                return "KHONG RO";
+  }
+}
+
+static void camPowerReport() {
+  esp_reset_reason_t r = esp_reset_reason();
+  Serial.printf("[PWR] Lan reset truoc: %s\n", resetReasonName());
+  if (r == ESP_RST_BROWNOUT) {
+    Serial.println("[PWR] *** DAY LA NGUYEN NHAN CHIN: board bi SAp nguon luc truoc. ***");
+    Serial.println("[PWR] *** Sensor bi mat dien luc dang hoat dong -> khong xuat frame.   ***");
+    Serial.println("[PWR] *** FIX: nguon 5V/2A rieng (khong dung cong USB may tinh),       ***");
+    Serial.println("[PWR] *** cap USB ngan + day, hoac them tu 470uF/10V vao 5V-GND.       ***");
+  }
+  Serial.printf("[PWR] Heap trong: %u byte, PSRAM: %u byte\n",
+                (unsigned)ESP.getFreeHeap(),
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+}
+
+// ============================================================================
 //  NONG MAY: sau khi init, bo 3 khung dau tien va IN ket qua ra Serial.
 //  Van de dang gap: esp_camera_init() OK (doc duoc PID sensor) NHUNG
 //  esp_camera_fb_get() luon tra NULL -> khong co khung nao de gui len server.
@@ -877,6 +1104,9 @@ have_hb_line:
 
   bool was_online = g_server_online;
   g_server_online = (code == 200);
+  if (g_server_online) {
+    g_last_hb_ok_ms = millis();   // cho discovery biet "vua online" -> khong doi URL
+  }
   if (g_server_online && !was_online) {
     Serial.printf("[HEARTBEAT] Da ket noi server %s:%u (Online - Che do cho, KHONG truyen anh)\n",
                   push_host.c_str(), push_port);
@@ -964,6 +1194,7 @@ static void doButtonCapture() {
   // FB-OVF). Neu khong co khung nao -> dung ngay bang 4 nhap.
   if (camWarmup() == 0) {
     Serial.println("[BTN] camera KHONG xuat frame -> bo qua dot 15s, 4 nhap");
+    camPowerReport();   // in nguyen nhan reset truoc do (co the la SAP NGUON)
     btnLed(false);
     g_is_scanning = false;
     btnBlink(4, 120, 120);
@@ -1208,10 +1439,102 @@ static void serialHandleCmd(char *line) {
     Serial.println("[CFG] Lan nhan nut ke tiep dung ngay, khong can reboot.");
     return;
   }
+  if (strcmp(line, "/disc") == 0) {
+#if DISCOVERY_ENABLE
+    g_discLastSend = 0;   // bo qua han che 5s -> hoi toan mang NGAY
+    discSend(DISC_MAGIC "|DISCOVER|manual");
+    Serial.printf("[DISC] Da gui DISCOVER. URL hien tai: %s (server hien online: %s)\n",
+                  cfg.push_url[0] ? cfg.push_url : "(mac dinh)",
+                  g_server_online ? "CO" : "KHONG");
+#else
+    Serial.println("[DISC] Da tat (DISCOVERY_ENABLE=0) - nap lai firmware voi 1 de bat.");
+#endif
+    return;
+  }
+  if (strcmp(line, "/cam") == 0) {
+    // Kiem tra camera NGAY LUC NAY khong can bam nut: day camera len, doc 3 khung.
+    // Ket qua: "3/3 khung co frame" = camera tot; "0/3" = loi PHAN CUNG.
+    Serial.println("[CAM] Kiem tra camera (khong can bam nut)...");
+    camPowerReport();
+    if (!camWake()) {
+      Serial.println("[CAM] LOI: khong init duoc sensor (doc khong duoc PID)");
+      return;
+    }
+    int ok = camWarmup();
+    Serial.printf("[CAM] KET QUA: %d/3 khung co frame -> %s\n", ok,
+                  ok ? "camera TOT, loi o phan mang/server"
+                     : "sensor KHONG xuat frame (loi PHAN CUNG: cap nguon/cao cam)");
+    return;
+  }
+  if (strcmp(line, "/camlog") == 0) {
+    // MO log VERBOSE cua driver camera MOT LAN de xem DRIVER noi dung gi khi
+    // fb_get() tra NULL (cam_hal / ll_cam / cam_config se in ro nguyen nhan:
+    // FB-OVF, sai xclk, sensor khong tra du lieu, DMA loi...).
+    // Chi dung de CHAN DOAN. Xong se tat lai ngay (vi VERBOSE spam -> FB-OVF).
+    Serial.println("[CAM] === MO LOG DRIVER CAMERA (1 lan chan doan) ===");
+    Serial.println("[CAM] Doc cac dong sau (thuong co 'cam_hal:' hay 'll_cam:'):");
+    esp_log_level_set("*", ESP_LOG_NONE);                 // tat het truoc
+    esp_log_level_set("cam_hal", ESP_LOG_VERBOSE);
+    esp_log_level_set("ll_cam", ESP_LOG_VERBOSE);
+    esp_log_level_set("cam_ccm", ESP_LOG_VERBOSE);
+    esp_log_level_set("cam_task", ESP_LOG_VERBOSE);
+    Serial.setDebugOutput(true);                           // cho ESP_LOG in ra UART
+
+    if (!camWake()) {
+      Serial.println("[CAM] LOI: khong init duoc sensor");
+    } else {
+      camWarmup();
+    }
+
+    Serial.setDebugOutput(false);                          // TAT NGAY
+    esp_log_level_set("*", ESP_LOG_NONE);
+    esp_log_level_set("cam", ESP_LOG_ERROR);
+    Serial.println("[CAM] === DONG LOG CHAN DOAN (da tat VERBOSE) ===");
+    return;
+  }
+  if (strcmp(line, "/cam2") == 0) {
+    // CAP NGUON LAI SENSOR (chi dung de THU khi /cam tra 0/3):
+    //  tat camera -> keo PWDN (chan nguon sensor) HIGH 600ms -> LOW -> init lai.
+    // Khac voi esp_camera_deinit (bi loi DMA theo ghi chu trong code), cach nay
+    // chi cat/nguon lai physical sensor - an toan, khong anh huong driver.
+    Serial.println("[CAM] Cap nguon lai sensor (PWDN) roi init lai...");
+    // Neu camera DANG init thi phai deinit truoc, khong the esp_camera_init lan 2.
+    // (Mot lan deinit/init la an toan; loi DMA chi xay ra khi lap lai nhieu lan.)
+    if (g_cam_on) {
+      esp_camera_deinit();
+      g_cam_on = false;
+      Serial.println("[CAM] Da deinit driver camera cu.");
+    }
+#if defined(PWDN_GPIO_NUM) && (PWDN_GPIO_NUM >= 0)
+    pinMode(PWDN_GPIO_NUM, OUTPUT);
+    digitalWrite(PWDN_GPIO_NUM, HIGH);      // TAT nguon sensor
+    delay(600);                             // cho sensor thuc su tat
+    digitalWrite(PWDN_GPIO_NUM, LOW);       // MO lai nguon
+    delay(300);                             // cho sensor on dinh truoc khi init I2C
+#endif
+    if (!camWake()) {
+      Serial.println("[CAM] LOI: khong init duoc sensor sau khi cap nguon lai");
+      return;
+    }
+    int ok = camWarmup();
+    Serial.printf("[CAM] KET QUA sau cap nguon lai: %d/3 khung\n", ok);
+    if (ok == 0) {
+      Serial.println("[CAM] Van 0/3 -> sensor THAT SU khong xuat frame.");
+      Serial.println("[CAM] Kiem tra: (1) cap FPC cam co day khong, (2) nguon 5V/2A,");
+      Serial.println("[CAM] (3) do cung cap duong 5V khi camera bat (dong lon).");
+    }
+    return;
+  }
   if (strcmp(line, "/help") == 0) {
     Serial.println("[CFG] Lenh Serial:");
     Serial.println("  /url                    - xem URL server dang dung");
     Serial.println("  /url <http://ip:port/duong-dan> - doi + luu URL server (NVS)");
+    Serial.println("  /cam                    - kiem tra camera (3 khung) khong can bam nut");
+    Serial.println("  /camlog                 - mo log VERBOSE cua driver camera (chan doan)");
+    Serial.println("  /cam2                   - cap nguon lai sensor roi kiem tra lai");
+#if DISCOVERY_ENABLE
+    Serial.println("  /disc                   - hoi toan mang 'ai la server?' ngay");
+#endif
     Serial.println("  /help                   - liet ke lenh");
     return;
   }
@@ -1317,7 +1640,7 @@ void setup() {
   }
 
   // Bao hieu "firmware da chay": LED sang co dinh ~1.5s khi boot xong.
-  // (Khac moi mau nhap ket qua -> nhanh nhanh biet board song, kể cả khi chua co WiFi.)
+  // (Khac moi mau nhap ket qua -> nhanh nhanh biet board song, ká»ƒ cáº£ khi chua co WiFi.)
   btnLed(true);
   delay(1500);
   btnLed(false);
@@ -1334,6 +1657,17 @@ void setup() {
   Serial.println("[CAM] Camera dang OI - se day khi nhan nut / dev mo /capture, /stream");
 
   startCameraServer();
+
+  // ---- TU TIM IP SERVER (UDP broadcast) ----
+  // Server Python (discovery.py) moi 5s gui "FACESYNC|SERVER|http://ip:5001" ra
+  // cong 4321. Neu IP server doi (DHCP) thi o day tu cap nhat url trong NVS.
+  discBegin();
+  if (discBootBurst()) {
+    Serial.printf("[DISC] Da dung dung URL server tu luc boot: %s\n", cfg.push_url);
+  } else {
+    Serial.println("[DISC] Chua nghe thay server nao (se hoi lai khi offline)");
+  }
+  discInfoPoll();   // gui ngay 1 goi "minh la ESP32 nay" -> server biet ip camera
 
 #if PUSH_ENABLE
   // Task day luong live len may chu (uu tien thap hon web server -> khong lam gi stream)
@@ -1368,6 +1702,8 @@ void setup() {
 
 void loop() {
   serialPoll();   // lenh Serial (/url, /help) - khong block, chay moi che do
+  discPoll();     // lang nghe server (va hoi toan mang khi offline) - khong block
+  discInfoPoll(); // thong bao ip camera cho server moi 15s - khong block
   if (cfg_setup_mode) {
     dnsServer.processNextRequest();   // captive portal: phan moi ten ve minh
   }

@@ -47,7 +47,7 @@ echo ============================================================
 echo    MAY CHU DIEM DANH KHUON MAT - ESP32-CAM
 echo    Cong dang nhap  : http://localhost:5000
 echo    Cong debug (CAM): http://localhost:5001
-echo    Server          : http://192.168.1.9:5001
+echo    IP server (tu tim qua UDP): xem dong "Tu tim nhau" duoi day
 echo ============================================================
 echo.
 

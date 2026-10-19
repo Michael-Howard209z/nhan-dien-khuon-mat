@@ -45,6 +45,7 @@ from werkzeug.serving import make_server
 
 import auth
 import database as db
+from discovery import DISC_PORT, DiscoveryService
 from face_engine import DEFAULTS, FaceEngine, draw_text
 from stream import PhoneCamera
 
@@ -248,6 +249,9 @@ hub = {"frame": None, "ts": 0.0, "source": "none"}
 out_lock = threading.Lock()
 output = {"jpeg": None, "ts": 0.0, "results": [], "source": "none", "age": 0.0}
 
+# Dịch vụ UDP tự tìm nhau (tạo trong main(); ở mức module để nơi khác dùng được).
+DISCOVERY: "DiscoveryService | None" = None
+
 # Thống kê ESP32: Heartbeat giữ kết nối khi nghỉ (không truyền ảnh) + Quét 15s khi nhấn nút
 esp32_state = {
     "last_ts": 0.0,
@@ -261,6 +265,11 @@ esp32_state = {
     "heap": None,
     "rssi": None,
     "last_session_id": "",
+    # IP camera biết được qua UDP discovery (hoạt động cả khi ESP32 CHƯA gửi
+    # được HTTP nào vì url server trong NVS đang sai).
+    "ip_udp": None,
+    "cam_mode": "",           # push / button / pull (do firmware báo)
+    "stream_url_auto": "",    # luồng PULL server tự điền khi phát hiện camera
 }
 
 # Ngưỡng thời gian cho 2 chế độ của ESP32-CAM (đơn vị giây):
@@ -1185,7 +1194,11 @@ def api_esp32_status():
         "hub_source": hub_src,
         "hub_age": round(now - hub_ts, 2) if hub_ts else None,
         "stream_url": SETTINGS.get("stream_url", ""),
-        "esp32_ip": st["ip"],
+        "esp32_ip": st["ip"] or esp32_state.get("ip_udp"),
+        "esp32_ip_source": ("http" if st["ip"] else
+                            ("udp" if esp32_state.get("ip_udp") else "")),
+        "cam_mode": esp32_state.get("cam_mode", ""),
+        "stream_url_auto": esp32_state.get("stream_url_auto", ""),
         "cam_base": esp32_base_url(),
         "hint": "Chế độ chờ: Chỉ heartbeat kết nối kiểm tra hoạt động (không truyền ảnh). Nhấn nút: Truyền ảnh liên tục 15s để nhận diện."
     })
@@ -1208,7 +1221,7 @@ def esp32_base_url():
             path = (p.path or "").strip("/").lower()
             if p.port == 81 or path in ("stream", "capture", "jpg", "cam", "mjpeg"):
                 return f"{p.scheme or 'http'}://{p.hostname}/"
-    ip = esp32_state.get("ip")
+    ip = esp32_state.get("ip") or esp32_state.get("ip_udp")
     if ip:
         return f"http://{ip}/"
     return None
@@ -1429,7 +1442,12 @@ def system_info():
             "push_count": esp["push_count"],
             "heap": esp["heap"],
             "rssi": esp["rssi"],
-            "ip": esp["ip"],
+            "ip": esp["ip"] or esp32_state.get("ip_udp"),
+            # IP/che do biet duoc qua UDP discovery (server tu tim camera)
+            "ip_udp": esp32_state.get("ip_udp"),
+            "cam_mode": esp32_state.get("cam_mode", ""),
+            "stream_url_auto": esp32_state.get("stream_url_auto", ""),
+            "discovery": (DISCOVERY.last_camera_ip if DISCOVERY else None),
         },
         "db": {
             "path": str(db_path),
@@ -1884,11 +1902,43 @@ def api_overview():
 
 
 # ----------------------------------------------------------------------- start
+def _on_discovered_camera(ip: str, mode: str) -> None:
+    """UDP discovery gọi tới: vừa biết IP camera (có thể CHƯA có HTTP nào tới)."""
+    # Không đè IP học được từ heartbeat (heartbeat là nguồn "chính chủ" hơn).
+    if not esp32_state.get("ip"):
+        esp32_state["ip_udp"] = ip
+    else:
+        esp32_state["ip_udp"] = ip
+    esp32_state["cam_mode"] = mode or esp32_state.get("cam_mode", "")
+
+    # CHỈ tự điền luồng PULL khi firmware báo đang ở chế độ PULL và chưa ai cấu
+    # hình STREAM_URL. Chế độ PUSH/BUTTON (ESP32 tự POST, cam đang Ở khi chờ)
+    # thì KHÔNG kéo :81/stream — sẽ đánh thức camera và tranh nguồn ảnh.
+    if mode == "pull" and not (SETTINGS.get("stream_url") or "").strip():
+        url = f"http://{ip}:81/stream"
+        print(f"[discovery] Tu dien luong PULL tu camera {ip}: {url}", flush=True)
+        SETTINGS["stream_url"] = url
+        esp32_state["stream_url_auto"] = url
+        try:
+            camera.set_url(url)
+        except Exception as exc:                    # không để discovery làm sập server
+            print(f"[discovery] khong ket noi duoc luong PULL: {exc}", flush=True)
+
+
 def main():
     """Chạy HAI máy chủ web trong cùng một tiến trình (dùng chung engine + camera)."""
     threading.Thread(target=process_loop, daemon=True, name="process").start()
     if SETTINGS["stream_url"]:
         camera.set_url(SETTINGS["stream_url"])
+
+    # ---- Tự tìm nhau qua UDP broadcast (discovery.py) ----
+    # Server nói "tôi là http://<ip>:<camera_port>" mỗi 5s -> ESP32 tự cập nhật
+    # URL khi IP máy chủ đổi; đồng thời nghe ESP32 báo danh để biết IP camera.
+    global DISCOVERY
+    DISCOVERY = DiscoveryService(SETTINGS["camera_port"], on_camera=_on_discovered_camera)
+    if not DISCOVERY.start():
+        print("  (Khong bat duoc UDP discovery - he thong van chay binh thuong)",
+              flush=True)
 
     host = SETTINGS["host"]
     portal_port = SETTINGS["port"]
@@ -1908,6 +1958,8 @@ def main():
     print(f"  Cau hinh     : {ENV_PATH}")
     print(f"  Dang nhap    : admin / {DEV_USERNAME} (mat khau xem .env)")
     print(f"  Camera (PULL debug): {SETTINGS['stream_url'] or '(chua dat STREAM_URL)'}")
+    print(f"  Tu tim nhau    : UDP cong {DISC_PORT}"
+          " - server gui lai IP cho ESP32, biet IP camera tu ESP32")
     print(f"  Phat hien    : {info['detector']}"
           f"{' (can theo diem moc)' if info['landmark_align'] else ''}")
     print(f"  Nhan dang    : {info['recognizer']} - nguong {info['threshold']:g}"
@@ -1930,6 +1982,8 @@ def main():
         portal_srv.server_close()
         cam_srv.shutdown()
         cam_srv.server_close()
+        if DISCOVERY:
+            DISCOVERY.stop()
 
 
 if __name__ == "__main__":

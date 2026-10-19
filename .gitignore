@@ -23,3 +23,11 @@ opencode.exe
 .opencode/
 backup-*/
 t-ch-h-p-server-esp32-cam-v-o-camerawebserver.json
+*.docx
+*.saygex69
+*.elf
+*.ino.elf
+build_esp32/
+*.bin
+*.map
+build/
