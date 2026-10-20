@@ -110,35 +110,78 @@ Day khong lien quan den discovery. Firmware da chan doan san:
 
 `esp_camera_init()` thanh cong + doc duoc `sensor PID: 0x5640` (OV5640) nghia la
 **I2C/SCCB va nguon sensor TOT**. Nhung `fb_get()` tra NULL nghia la sensor
-khong XUAT frame. Xep theo kha nang:
+khong XUAT frame.
 
-1. **Nguon yeu** (hay gap nhat): 5V tu cong USB may tinh/hub khong du dong cho
-   camera + WiFi. Dung nguon 5V/2A rieng hoac cap USB ngan, day day.
-2. **Cap cam (FPC) long**: thao ra lap lai chac chan, kiem tra day bi gian/duong.
-3. **Do sang moi truong qua thap** + `BUTTON_SCAN_FLASH=0`: van cho frame nhung
-   den toi. Khong gay NULL, nhung anh se den.
-4. **XCLK bi chiem**: neu them code moi dung chan/LEDC thi phai tra lai. (Code
-   discovery chi dung UDP, khong dong vao LEDC/XCLK -> khong phai nguyen nhan.)
+### 1. SENSOR BI TREO LUC COLD BOOT (nguyen nhan THUC TE da chot 2026-10-20)
 
-### Chan doan nguon (quan trong nhat)
+Loi nay xay ra **moi lan tat/bat nguon**, khong lien quan den code hay phan cung
+hong. Cau chung minh:
 
-`esp_camera_init()` thanh cong + doc duoc PID nghia la sensor DU DIEN de noi I2C
-(dong rat nho). Nhung khong xuat frame nghia la sensor khong chay duoc khi bat
-dong luc - dau tay la **NGUON YEU**.
+| Buoc | So chuoi PWDN | Ket qua |
+|---|---|---|
+| Binh thuong luc boot | 0 | `0/3` khung (NULL) |
+| `camWakeInit()` (ban pwdn-powercycle) | 1 | `0/3` khung |
+| `/cam2` sau do | 2 | **`3/3` khung** |
+
+**Nguyen nhan goc:** luc chip reset, chan GPIO32 (PWDN) dang o trang thai
+input/Hi-Z -> sensor tu len nguon trong khi XCLK (GPIO0) chua on dinh -> OV5640
+bi "treo": I2C van doc duoc PID nhung khong xuat frame. Ban truoc chi
+`digitalWrite(PWDN, LOW)` (vi rang sensor da TAT) -> khong thuc su cap lai.
+
+**Da sua (firmware `2026-10-20-pwdn2-nodeinit`):** `camWakeInit()` cat/cap
+nguon PWDN **2 LAN** truoc khi `esp_camera_init()` - log chung minh 1 lan la
+khong du (lan 1: 0/3, lan 2: 3/3).
+
+### 1b. *** KHONG DUOC GOI `esp_camera_deinit()` *** (gay "brick" camera)
+
+Loi nghiem trong nhat, da xay ra ngay khi vua sua xong muc 1:
+
+```
+E cam_hal: cam_dma_config(509): frame buffer malloc failed
+E camera: Camera config failed with error 0xffffffff
+```
+
+| Thu | Ket qua |
+|---|---|
+| `deinit()` -> `init()` | **luon that bai** (2/2 lan trong log), cam "brick" den khi reset chip |
+| `init()` KHONG qua `deinit()` | luon thanh cong |
+
+Ly do: `esp_camera_deinit()` khong giai phong sach bo dem DMA noi bo -> lan
+init ke tiep phai cap phan bo THUA -> loi. Doan ghi chu tai `camSleep()` cua du
+an da canh bao truoc dieu nay.
+
+**Vi vay:** recovery chi duoc phep **cat/cap nguon sensor qua PWDN**, driver
+camera van giu nguyen. `camWarmupRecover()` va lenh `/cam2` da sua theo huong
+nay. Trong toan bo firmware da khong con goi `esp_camera_deinit()`.
+
+**Kiem tra dang chay ban nao:** dong dau tien khi boot phai la
+`[CFG] Firmware: 2026-10-20-pwdn-powercycle`. Neu van hien
+`2026-10-19-udp-discovery` nghia la **CHUA NAP lai** (tat/bat nguon khong doi duoc firmware).
+
+### 2. Nguon yeu (hay gap nhat truoc khi chot nguyen nhan tren)
+
+5V tu cong USB may tinh/hub khong du dong cho camera + WiFi. Dung nguon 5V/2A
+rieng hoac cap USB ngan, day day. Note: brownout chi bat duoc khi ESP32 MAT DIEN;
+con sensor co the "chet" o muc dong thap hon ma ESP32 van chay tot -> **khong
+hien dong brownout van co the la nguon yeu**.
+
+### 3. Cap cam (FPC) long: thao ra lap lai chac chan, kiem tra day bi gian/duong.
+
+### 4. Do sang moi truong qua thap + `BUTTON_SCAN_FLASH=0`: van cho frame nhung
+den toi. Khong gay NULL, nhung anh se den.
+
+### Chan doan nguon (dung khi nghi nguon yeu)
 
 Lenh `/cam` in them dong:
 ```
 [PWR] Lan reset truoc: SAP NGUON (BROWNOUT) - NGUON YEU!
 ```
-Neu thay dong nay -> **nguyen nhan chinh da chot**: board bi mat dien luc.
-Cach fix (xep theo hieu qua):
+Neu thay dong nay -> board bi mat dien luc that su. Cach fix (xep theo hieu qua):
 1. Nguon 5V/2A RIENG (nguon sac dt tot), khong dung cong USB cua may tinh/hub.
 2. Cap USB NGAN + day (cap dai/long -> suot ap -> brownout).
 3. Them tu 470uF/10V (hoac 1000uF) dong dien vao chan 5V va GND cua board.
-4. Tat WiFi khi test camera (do an luong): khong can, vi vay chi dung /cam2.
 
-Neu khong thay dong brownout van `0/3` -> keo/lap lai cap FPC cua camera
-(trong suot, cam sat day, khong bi gap). Van that bai -> thu `/cam2`.
+Van `0/3` ma khong co brownout -> thao/lap lai cap FPC cua camera.
 
 **Cach loai tru ro rang:** nap `build_esp32_noDISC` (DISCOVERY_ENABLE=0) roi bam
 nut. Van `0/3` -> loi PHAN CUNG, khong phai do code.

@@ -1,6 +1,5 @@
-// ============================================================================
+
 //  CAU HINH PERSISTENT (luu trong NVS) - che do AP cau hinh
-// ----------------------------------------------------------------------------
 //  Muc dich: khi ESP32 CHUA ket noi duoc WiFi (sai mat khau, chua co mang,
 //  doi dia chi server...) thi tu tao mang WiFi rieng (AP) de ket noi vao va
 //  mo trang web cau hinh tai http://192.168.4.1/ :
@@ -19,7 +18,7 @@
 //     if (cfg.use_static_ip) cfg_apply_static_ip();
 //
 //  Trang cau hinh: /setup  (xem setup_page.h), API: /api/cfg, /api/scan
-// ============================================================================
+
 #pragma once
 #include <Arduino.h>
 

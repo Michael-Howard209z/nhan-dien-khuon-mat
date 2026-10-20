@@ -1,7 +1,7 @@
-// ============================================================================
+
 //  TRANG CAU HINH (che do AP) - duoc phuc tai /setup va tai / khi dang o AP
 //  Nhe (khong gzip) de ESP32 khong phai nen, trang nay chi mo 1 lan khi lap dat.
-// ============================================================================
+
 #pragma once
 
 static const char SETUP_HTML[] = R"SETUPHTML(

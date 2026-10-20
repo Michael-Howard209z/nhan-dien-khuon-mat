@@ -14,7 +14,7 @@ rem  FQBN PHAI DAY DU nhu luc build (sai PartitionScheme -> boot loi).
 rem =====================================================================
 set "PROJ=%~dp0"
 set "CLI=%LOCALAPPDATA%\Programs\Arduino IDE\resources\app\lib\backend\resources\arduino-cli.exe"
-set "SKETCH=%PROJ%CameraWebServer_copy_20261009125906"
+set "SKETCH=%PROJ%firmware_esp32cam"
 set "FQBN=esp32:esp32:esp32cam:CPUFreq=240,FlashFreq=80,FlashMode=dio,PartitionScheme=huge_app,DebugLevel=none"
 set "OUTDIR=%PROJ%build_esp32"
 set "PORT=COM7"
@@ -23,7 +23,8 @@ if "%~1" neq "" set "PORT=%~1"
 if /i "%~2"=="noDISC" set "OUTDIR=%PROJ%build_esp32_noDISC"
 if /i "%~1"=="noDISC" set "OUTDIR=%PROJ%build_esp32_noDISC"
 
-if not exist "%OUTDIR%\CameraWebServer_copy_20261009125906.ino.bin" (
+rem Ten file build theo ten thu muc sketch -> doi ten thu muc la doi ten file.
+if not exist "%OUTDIR%\firmware_esp32cam.ino.bin" if not exist "%OUTDIR%\CameraWebServer_copy_20261009125906.ino.bin" (
   echo [LOI] Chua co file build trong:
   echo       %OUTDIR%
   echo       Chay Arduino CLI compile truoc, hoac dung "flash_esp32.bat" thuong.

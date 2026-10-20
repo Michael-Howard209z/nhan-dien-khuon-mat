@@ -1,9 +1,9 @@
-// ============================================================================
+
 //  CAU HINH PERSISTENT (NVS) - xem app_config.h
 //  Luu tat ca trong Preferences namespace "camcfg". Chi doc/ghi cac key can
 //  thiet -> NVS khong bi phinh, va co the them/sua key sau nay ma khong mat
 //  du lieu cu.
-// ============================================================================
+
 #include "app_config.h"
 #include <Preferences.h>
 #include <WiFi.h>
@@ -19,10 +19,10 @@ static char def_ssid_buf[33] = "";
 static char def_pass_buf[65] = "";
 static char def_push_buf[128] = "";
 
-// ----------------------------------------------------------------------------
+
 //  Mac dinh: truyen tu .ino (ssid/password/PUSH_URL dang hard-code) -> neu
 //  chua luu gi trong NVS thi firmware van hoat dong nhu truoc day.
-// ----------------------------------------------------------------------------
+
 static void cfg_defaults(const char *def_ssid, const char *def_pass, const char *def_push) {
   // Chi ghi bo dem mac dinh khi khac con tro (cfg_reset() truyen chinh no)
   if (def_ssid != def_ssid_buf) strlcpy(def_ssid_buf, def_ssid ? def_ssid : "", sizeof(def_ssid_buf));
@@ -103,11 +103,11 @@ void cfg_reset() {
   Serial.println("[CFG] da khoi phuc cau hinh mac dinh");
 }
 
-// ----------------------------------------------------------------------------
+
 //  IP tinh: WiFi.config(local_ip, gateway, subnet, dns) PHAI goi TRUOC
 //  WiFi.begin() (sau do DHCP se bi bo qua). Tra ve false neu chua dung
 //  hoac IP nhap sai dinh dang.
-// ----------------------------------------------------------------------------
+
 bool cfg_apply_static_ip() {
   if (!cfg.use_static_ip) return false;
   IPAddress ip, gw, mask, dns;

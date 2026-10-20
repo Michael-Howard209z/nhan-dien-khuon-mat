@@ -25,3 +25,4 @@ build_esp32/
 *.bin
 *.map
 build/
+*.tmp

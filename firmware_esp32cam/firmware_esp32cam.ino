@@ -1,6 +1,4 @@
-﻿// ============================================================================
-//  ESP32-CAM + SERVER NHAN DIEN KHUON MAT (Python, thu muc goc du an)
-// ----------------------------------------------------------------------------
+﻿//  ESP32-CAM + SERVER NHAN DIEN KHUON MAT (Python, thu muc goc du an)
 //  Firmware nay = mau CameraWebServer cua Espressif + them che do PUSH khung
 //  hinh ve server Python (server.py). Co 3 che do chon (xem bang duoi):
 //
@@ -46,32 +44,23 @@
 #include <esp_heap_caps.h>
 #include "app_config.h"         // cau hinh persistent (NVS): WiFi, IP tinh, server, huong cam
 #include <WiFiUdp.h>            // phat hien server qua UDP broadcast (khong can IP server)
-
-// ===========================
 // Select camera model in board_config.h
-// ===========================
+
 #include "board_config.h"
 
-// ===========================
 // WiFi MAC DINH (chi dung khi LAN DAU chua co gi trong NVS).
 // Sau nay sua tren trang web /setup (khong can code lai).
-// ===========================
+
 const char *ssid = "Test";
 const char *password = "88888888";
-
-// ============================================================================
 //  CHE DO AP CAU HINH
 //  Neu khong ket noi duoc WiFi (hoac giu nut luc boot) thi ESP32 tu tao mang
 //  WiFi rieng (mac dinh: ESP32-CAM-Setup / 12345678) + captive portal ->
 //  ket noi vao do, dien thoai tu mo trang http://192.168.4.1/ de cau hinh
 //  mang WiFi, IP tinh, URL server, huong camera...
 //  (ham startSetupMode() + bootHeldForSetup() xem truoc void setup())
-// ============================================================================
 static DNSServer dnsServer;
-
-// ==================================================================
 //  DAY KHUNG HINH LEN MAY CHU  -->  sua o day
-// ==================================================================
 #define PUSH_ENABLE      0                        // TAM TAT PUSH (mang nay chan ESP32->PC: 0 POST toi server)
                                                   // PULL chay on (server keo :81/stream). Muoi PUSH lai thi doi 1
                                                   // khi cam + server cung mang khong cach ly (vd hotspot dien thoai).
@@ -88,14 +77,11 @@ static DNSServer dnsServer;
 #define PUSH_FPS         10                       // khung/giay gui len (1..15) -- QVGA+q15 ~8KB/khung, 10fps ~640kbps muot
 #define PUSH_JPEG_MAX    (120 * 1024)             // bo dem tam cho 1 khung (VGA q12 ~15-30KB -> 120KB du, tiet kiem PSRAM)
 #define PUSH_BOUNDARY    "esp32cam"
-// ==================================================================
-
-// ==================================================================
 //  CHE DO NUT NHAN (che do chinh cua san pham)  -->  sua o day
-// ==================================================================
+
 #define BUTTON_ENABLE     1       // 1 = che do nut nhan (cam OFF khi nghi, nhan nut = truyen anh 15s)
                                   // 0 = quay lai che do cu (PULL/PUSH lien tuc, cam luon bat)
-#define FW_VERSION "2026-10-19-udp-discovery"  // in ra Serial luc boot de biet board dang chay ban nao
+#define FW_VERSION "2026-10-20-pwdn2-nodeinit"  // in ra Serial luc boot de biet board dang chay ban nao
 // --- Tu tim IP server qua UDP broadcast (xem them o phan DISC duoi day) ---
 //  1 = MOI (khuyen dung): server phat "FACESYNC|SERVER|http://ip:5001" ra mang,
 //      ESP32 tu doi URL khi server doi IP. Khong anh huong gi den camera.
@@ -147,7 +133,7 @@ static DNSServer dnsServer;
 #define PUSH_ONESHOT 0
 #endif
 
-// ---- Prototype tuong minh (khong dua vao auto-prototype cua Arduino) ----
+// Prototype tuong minh (khong dua vao auto-prototype cua Arduino)
 void startCameraServer();
 void setupLedFlash();
 bool camWake();          // bat camera (init lai neu can) -> true = OK
@@ -171,7 +157,7 @@ static void heartbeatPoll();                       // duy tri ket noi (khong tru
 
 static void serialPoll();   // lenh Serial (/url, /help): doi URL server khong can nap lai
 
-// ---------------- Tu tim IP server qua UDP broadcast ----------------
+//Tu tim IP server qua UDP broadcast 
 static uint32_t g_last_hb_ok_ms = 0;   // lan heartbeat thanh cong gan nhat
                                        // (dung cho ca discovery va chan doan)
 #if DISCOVERY_ENABLE
@@ -353,7 +339,7 @@ static void discBegin() {}
 static bool discBootBurst() { return false; }
 #endif  // DISCOVERY_ENABLE
 
-// ---------------- Trang thai push va heartbeat ----------------
+//Trang thai push va heartbeat 
 volatile int g_push_state = 0;      // 0 = chua ket noi/dang lai, 1 = dang day
 volatile uint32_t g_push_ok = 0;    // so khung gui thanh cong
 volatile uint32_t g_push_err = 0;   // so khung loi
@@ -361,7 +347,7 @@ const char *g_push_url = PUSH_URL;   // se tro sang cfg.push_url sau cfg_load() 
 volatile bool g_server_online = false; // true = server Python dang phan hoi heartbeat (online)
 volatile bool g_is_scanning = false;   // true = dang trong dot truyen anh 15 giay
 volatile uint32_t g_last_heartbeat_ms = 0;   // khong static: ham discovery doc duoc
-// ---------------- Trang thai camera (doc tu app_httpd.cpp) ----------------
+//Trang thai camera (doc tu app_httpd.cpp) 
 volatile bool g_cam_on = false;         // true = camera da init (che do nguoc: OFF khi nghi)
 volatile bool g_stream_active = false;  // true = stream :81 dang chay (chi de hien thi, camSleep hien la no-op)
 int g_button_pin = BUTTON_ENABLE ? BUTTON_PIN : -1;   // GPIO nut nhan, -1 = tat che do nut nhan
@@ -763,20 +749,40 @@ static void push_task(void *arg) {
 }
 #endif  // PUSH_ENABLE
 
-// ============================================================================
 //  BAT / TAT CAMERA  (che do nut nhan giu sensor OFF khi nghi de gian CPU)
 //  app_httpd.cpp goi cac ham nay qua extern (camWake khi dev mo /capture,
 //  /stream, /live?state=1; camSleep khi /live?state=0).
-// ============================================================================
+
 static volatile bool g_cam_waking = false;  // chan 2 task cung luc init camera
 
 // Noi dung init duoc tach tu setup() cu, chay duoc nhieu lan
 static bool camWakeInit() {
 #if defined(PWDN_GPIO_NUM) && (PWDN_GPIO_NUM >= 0)
-  // PWDN cua sensor dang cap (active HIGH): keo LOW de nguon cho camera
+  // CAP NGUON LAI SENSOR (PWDN) 2 LAN TRUOC MOI LAN INIT - khong chi dat LOW.
+  //
+  // NGUYEN NHAN GOC (chung minh bang log Serial 2026-10-19/20):
+  //  Luc COLD BOOT, chan GPIO32 (PWDN) dang o trang thai input/Hi-Z cua luc
+  //  reset chip -> sensor tu len nguon trong khi XCLK (GPIO0) chua on dinh
+  //  -> OV5640 bi "TREO": doc duoc PID qua I2C (0x5640) nhung khong xuat
+  //  frame -> fb_get() NULL 3/3.
+  //  Ban cu chi `digitalWrite(PWDN, LOW)` (vi rang sensor da TAT) -> khong
+  //  thuc su cap lai -> loi xay ra lai moi lan reboot.
+  //
+  //  TAI SAO LA 2 LAN? Nhan tu chinh log Serial (2026-10-20):
+  //   - luc init dau tien (CHI 1 chuoi PWDN)  -> 0/3 khung (NULL)
+  //   - lan /cam2 sau do (2 chuoi PWDN lien tuc) -> 3/3 khung (143/30/30 ms)
+  //  Hieu don gian: sensor luc nay dang trong trang thai "treo" nen can MOT
+  //  LAN CAT NGUON NUA de thuc su ve trang thai sach. Them chuoi thu 2 chi ton
+  //  them 900ms va chi xay ra DUY NHAT luc driver vua init (khong phai moi frame).
   pinMode(PWDN_GPIO_NUM, OUTPUT);
+  digitalWrite(PWDN_GPIO_NUM, HIGH);   // Chuoi 1: TAT nguon sensor
+  delay(600);                          // cho sensor thuc su tat
+  digitalWrite(PWDN_GPIO_NUM, LOW);    // MO lai nguon
+  delay(300);                          // cho on dinh truoc khi init I2C
+  digitalWrite(PWDN_GPIO_NUM, HIGH);   // Chuoi 2: cat nua lan (log chung minh can)
+  delay(600);
   digitalWrite(PWDN_GPIO_NUM, LOW);
-  delay(100);   // sensor vua duoc cap nguon tu OFF -> cho on dinh truoc khi init I2C
+  delay(300);
 #endif
 
   camera_config_t config;
@@ -898,6 +904,9 @@ bool camWake() {
 // Ly do (chung minh bang log Serial): esp_camera_deinit() khong giai phong
 // sach heap DMA noi bo -> esp_camera_init() ke tiep chet voi
 // "cam_dma_config: frame buffer malloc failed" (cam brick den khi reset chip).
+// XAC NHAN LAI 2026-10-20: 2/2 lan deinit() -> init lai de that bai
+// (error 0xffffffff) ngay ca khi chi lap MOT lan - khong phai lap nhieu lan.
+// Nguoc lai, lan init khong qua deinit (g_cam_on=false) luon thanh cong.
 // Vi vay: init 1 LAN duy nhat luc can dau tien, giu nguyen suot uptime.
 // Sensor chi chay that khi co fb_get (/quet nut) hoac :81 stream; luc nghi
 // tieu thu them ~100mA so voi deinit - chap nhan duoc de doi lay chay on dinh.
@@ -906,13 +915,12 @@ void camSleep() {
   return;   // co y khong lam gi
 }
 
-// ============================================================================
 //  CHAN DOAN NGUON: ESP32 co the RESET vi SAP NGUON (brownout) khi camera +
 //  WiFi dong luc tren nguon yeu. Neu lan boot truoc bi brownout thi day la
 //  NGUYEN NHANso 1 giai thich vi sao sensor doc duoc PID nhung khong xuat frame
 //  (sensor can dong lon hon khi bat dau stream -> nguon rot -> sensor khoi
 //  dong lai khong day du -> khong co khung, trong khi I2C van doc duoc).
-// ============================================================================
+
 static const char *resetReasonName() {
   switch (esp_reset_reason()) {
     case ESP_RST_POWERON:   return "BAT NGUON (nguon moi duoc cam vao)";
@@ -944,7 +952,6 @@ static void camPowerReport() {
                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
 }
 
-// ============================================================================
 //  NONG MAY: sau khi init, bo 3 khung dau tien va IN ket qua ra Serial.
 //  Van de dang gap: esp_camera_init() OK (doc duoc PID sensor) NHUNG
 //  esp_camera_fb_get() luon tra NULL -> khong co khung nao de gui len server.
@@ -971,7 +978,7 @@ static int camWarmup() {
   return ok;
 }
 
-// ============================================================================
+
 //  TU PHUC HOI: luc boot, OV5640 thuong bi "TREO" (doc duoc PID nhung khong xuat
 //  frame).Nguyen nhan: sensor van con trang thai ngu truoc do nguon cham, hoac
 //  nguon 5V chua on dinh luc init.
@@ -979,31 +986,39 @@ static int camWarmup() {
 //  PWDN (HIGH 600ms) -> cap lai (LOW) -> init lai -> 3/3 khung.
 //  Ham nay tu goi khi camWarmup() == 0, khong can nguoi dung go /cam2.
 //  Tra ve so khung co frame sau khi thu lai.
-// ============================================================================
+
 static int camWarmupRecover() {
+  // *** KHONG GOI esp_camera_deinit() ***
+  // Log 2026-10-20 chung minh ro: moi lan deinit() -> init lai la that bai voi
+  //   "cam_hal: cam_dma_config(509): frame buffer malloc failed" (error 0xffffffff)
+  //   -> cam "brick" den khi reset chip. Ly do: deinit khong giai phong sach
+  //   bo dem DMA noi bo (doan ghi chu tai camSleep() cua du an da canh bao truoc).
+  //   Nguoc lai: init KHONG qua deinit luon thanh cong (xem log: lan /cam2).
+  //
+  // Vay recovery chi duoc phep cat/cap nguon sensor qua PWDN. Driver camera
+  // van giu nguyen -> khong dot phat DMA, khong brick.
+  Serial.println("[CAM] 0/3 khung -> CAT/ CAP NGUON SENSOR QUA PWDN (KHONG deinit)...");
 #if defined(PWDN_GPIO_NUM) && (PWDN_GPIO_NUM >= 0)
-  Serial.println("[CAM] 0/3 khung -> THU CAP NGUON LAI SENSOR (PWDN)...");
-  esp_camera_deinit();               // buoc buoc: phai deinit truoc khi init lai
-  g_cam_on = false;
-  digitalWrite(PWDN_GPIO_NUM, HIGH); // TAT nguon sensor
+  digitalWrite(PWDN_GPIO_NUM, HIGH);   // TAT nguon sensor
   delay(600);
-  digitalWrite(PWDN_GPIO_NUM, LOW);  // MO lai
-  delay(300);                        // cho sensor on dinh truoc khi init I2C
+  digitalWrite(PWDN_GPIO_NUM, LOW);    // MO lai
+  delay(300);
+#endif
+  // Neu driver chua init (g_cam_on=false: luc nay esp_camera_init() chua
+  // tung chay hoac da loi) thi camWake() se init - va camWakeInit() van co
+  // san chuoi PWDN rieng. Neu driver dang chay thi camWake() tra ve true
+  // ngay, khong deinit gi ca -> chi reset sensor la driver tiep tuc nhan khung.
   if (!camWake()) {
     Serial.println("[CAM] LOI: khong init duoc sensor sau cap nguon lai");
     return 0;
   }
-  // Sensor moi cap lai can them thoi gian dong bo hoa (thuong 200-500ms).
   delay(300);
   return camWarmup();
-#else
-  return 0;   // board khong co chan PWDN -> khong cap nguon lai duoc
-#endif
 }
 
-// ============================================================================
+
 //  CHE DO NUT NHAN: poll khong block, debounce, chup 1 anh + POST len server
-// ============================================================================
+
 #if BUTTON_ENABLE
 
 // LED phep biet: dung flash GPIO4 (LED_GPIO_NUM) neu co, khong co thi den do GPIO33.
@@ -1067,10 +1082,10 @@ static void cam_sleep_request() {
   g_sleep_req = true;
 }
 
-// ============================================================================
+
 //  HEARTBEAT: duy tri ket noi voi server Python ma KHONG truyen hinh anh
 //  Chi gui 1 HTTP GET nhe (~100 byte text) moi 3s de biet server con song.
-// ============================================================================
+
 static void heartbeatPoll() {
   if (WiFi.status() != WL_CONNECTED || g_is_scanning) return;
   uint32_t now = millis();
@@ -1376,9 +1391,7 @@ static void buttonPoll() {
 
 #endif  // BUTTON_ENABLE
 
-// ============================================================================
 //  CHE DO AP CAU HINH (xem ghi chu o dau file)
-// ============================================================================
 // Giu nut nhan ~1.5s luc boot = vao che do AP cau hinh (dung khi muon doi
 // cau hinh ma khong reset duoc WiFi da luu). Tra ve true = dang giu nut.
 static bool bootHeldForSetup() {
@@ -1429,7 +1442,7 @@ static void startSetupMode() {
                 ap_ip.toString().c_str());
 }
 
-// ============================================================================
+
 //  LENH SERIAL (Serial Monitor, baud 115200, Newline): doi URL server ma
 //  khong can sua code / nap lai. Luu vao NVS (giu sau khi mat dien).
 //    /url                                  -> in URL server dang dung
@@ -1437,7 +1450,7 @@ static void startSetupMode() {
 //                                          -> luu URL moi, lan nhan nut ke
 //                                             tiep dung ngay (khong reboot)
 //    /help                                 -> liet ke lenh
-// ============================================================================
+
 static void serialHandleCmd(char *line) {
   while (*line == ' ' || *line == '\t') line++;   // bo khoang trang dau
   if (*line == '\0') return;
@@ -1530,30 +1543,16 @@ static void serialHandleCmd(char *line) {
     return;
   }
   if (strcmp(line, "/cam2") == 0) {
-    // CAP NGUON LAI SENSOR (chi dung de THU khi /cam tra 0/3):
-    //  tat camera -> keo PWDN (chan nguon sensor) HIGH 600ms -> LOW -> init lai.
-    // Khac voi esp_camera_deinit (bi loi DMA theo ghi chu trong code), cach nay
-    // chi cat/nguon lai physical sensor - an toan, khong anh huong driver.
-    Serial.println("[CAM] Cap nguon lai sensor (PWDN) roi init lai...");
-    // Neu camera DANG init thi phai deinit truoc, khong the esp_camera_init lan 2.
-    // (Mot lan deinit/init la an toan; loi DMA chi xay ra khi lap lai nhieu lan.)
-    if (g_cam_on) {
-      esp_camera_deinit();
-      g_cam_on = false;
-      Serial.println("[CAM] Da deinit driver camera cu.");
-    }
-#if defined(PWDN_GPIO_NUM) && (PWDN_GPIO_NUM >= 0)
-    pinMode(PWDN_GPIO_NUM, OUTPUT);
-    digitalWrite(PWDN_GPIO_NUM, HIGH);      // TAT nguon sensor
-    delay(600);                             // cho sensor thuc su tat
-    digitalWrite(PWDN_GPIO_NUM, LOW);       // MO lai nguon
-    delay(300);                             // cho sensor on dinh truoc khi init I2C
-#endif
-    if (!camWake()) {
-      Serial.println("[CAM] LOI: khong init duoc sensor sau khi cap nguon lai");
-      return;
-    }
-    int ok = camWarmup();
+    // CAP NGUON LAI SENSOR (chi dung de THU khi /cam tra 0/3).
+    //
+    // KHONG GOI esp_camera_deinit() - day la loi da gay ra "brick" camera:
+    // log 2026-10-20 chung minh 2/2 lan deinit() -> init lai de that bai voi
+    //   "cam_hal: cam_dma_config(509): frame buffer malloc failed" (0xffffffff),
+    //   trong khi CUNG luc do lan khong qua deinit lai init duoc va 3/3 khung.
+    // Ly do: deinit khong giai phong sach bo dem DMA noi bo.
+    // Goi chung ham recovery (cat/cap PWDN, driver van giu nguyen) cho an toan.
+    Serial.println("[CAM] Cap nguon lai sensor (PWDN)...");
+    int ok = camWarmupRecover();
     Serial.printf("[CAM] KET QUA sau cap nguon lai: %d/3 khung\n", ok);
     if (ok == 0) {
       Serial.println("[CAM] Van 0/3 -> sensor THAT SU khong xuat frame.");
@@ -1685,7 +1684,7 @@ void setup() {
 #if BUTTON_ENABLE
 #endif
 
-  // ---- KHONG DAY CAMERA TAI BOOT ----
+  // KHONG DAY CAMERA TAI BOOT 
   // Chi init camera ngay truoc khi doc frame (doButtonCapture hoac dev mo
   // /capture, /stream, /live). Camera dang OI se du day len khi can, va se tu
   // "tat" (khong doc frame) sau CAM_OFF_DELAY_MS khi khong con ai su dung.
@@ -1695,7 +1694,7 @@ void setup() {
 
   startCameraServer();
 
-  // ---- TU TIM IP SERVER (UDP broadcast) ----
+  //  TU TIM IP SERVER (UDP broadcast) 
   // Server Python (discovery.py) moi 5s gui "FACESYNC|SERVER|http://ip:5001" ra
   // cong 4321. Neu IP server doi (DHCP) thi o day tu cap nhat url trong NVS.
   discBegin();
