@@ -26,3 +26,4 @@ build_esp32/
 *.map
 build/
 *.tmp
+*.doc
