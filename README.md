@@ -95,7 +95,7 @@ Tách 3 chặng (chụp → gửi → khớp) để đoán lỗi: **tích** = đ
 | Endpoint | Khi nào dùng | Nội dung |
 |---|---|---|
 | `GET /api/esp32/heartbeat?heap=..&rssi=..&phase=idle` | Suốt thời gian **chờ** (mỗi 3s) | Chỉ giữ liên lạc — **không truyền ảnh**. Server trả `{status: ready\|scanning, is_scanning, registered_faces}`. Kèm `heap`/`rssi` để hiển thị sức khoẻ board; `phase=idle` báo server đóng phiên quét ngay khi vừa hết 15s. |
-| `POST /api/esp32/frame?capture=1&session_id=<mã>` | Trong **đợt 15s** sau khi nhấn nút | Ảnh JPEG liên tục (~2–3 khung/giây). Server nhận diện và **chỉ điểm danh 1 lần** cho mỗi `session_id`; các khung sau trả `already:true`. Thiếu `session_id` (firmware cũ) → server tự khoá theo khung 15s tính từ thời gian. |
+| `POST /api/esp32/frame?capture=1&session_id=<mã>` | Trong **đợt 15s** sau khi nhấn nút | Ảnh JPEG liên tục (~2–3 khung/giây). Server nhận diện và **chỉ điểm danh 1 lần** cho mỗi `session_id`; các khung sau trả `already:true`. Thiếu `session_id` (firmware cũ) → server tự khoá theo khung 15s tính từ thời gian. Lưu ý: `already:true` cũng xuất hiện ở **`session_id` mới** nếu học sinh đã được điểm danh trong buổi/ngày đó (khoá `(student_id, day, session)`) — server không ghi thêm dòng, chỉ cộng `hits`. |
 
 - Trạng thái thiết bị: `GET /api/esp32/status` (cần tài khoản developer) trả
   `mode` (`idle` \| `scanning` \| `offline`), `online`, `is_scanning`,
@@ -161,7 +161,49 @@ Server mở **hai cổng cùng lúc** (một tiến trình, chung bộ nhớ nh�
 | **Cổng quản lý** | `http://<ip-máy>:5000` | **Mọi người** — 1 trang đăng nhập duy nhất |
 | **Cổng debug** | `http://<ip-máy>:5001` | **Chỉ developer** — preview, cấu hình engine, cài ESP32 |
 
-Máy khác trong mạng thay `localhost` bằng IP máy chủ: `http://192.168.1.9:5000`.
+Máy khác trong mạng thay `localhost` bằng IP máy chủ: `http://192.168.0.50:5000`.
+
+### Đặt IP tĩnh cho máy chủ (BẮT BUỘC khi chạy thật)
+
+ESP32-CAM lưu URL server trong NVS (`http://<ip>:5001/api/esp32/frame`). Nếu IP
+máy chủ đổi do DHCP cấp lại, camera sẽ mất kết nối (chỉ tự tìm lại khi có
+discovery UDP 4321); nếu IP cũ bị máy khác chiếm, ảnh có thể gửi nhầm. Vì vậy
+phải đặt **IP tĩnh** (hoặc DHCP reservation theo MAC) cho máy chủ.
+
+Ubuntu/Debian dùng NetworkManager:
+
+```bash
+nmcli connection show
+sudo nmcli connection modify "<tên-kết-nối>" \
+  ipv4.method manual \
+  ipv4.addresses 192.168.0.50/24 \
+  ipv4.gateway 192.168.0.1 \
+  ipv4.dns "8.8.8.8,1.1.1.1"
+sudo nmcli connection up "<tên-kết-nối>"
+```
+
+Hoặc netplan (`/etc/netplan/*.yaml`, thay `eth0` và gateway cho đúng máy):
+
+```yaml
+network:
+  version: 2
+  ethernets:
+    eth0:
+      dhcp4: false
+      addresses: [192.168.0.50/24]
+      routes:
+        - to: default
+          via: 192.168.0.1
+      nameservers:
+        addresses: [8.8.8.8, 1.1.1.1]
+```
+
+```bash
+sudo netplan apply
+```
+
+Sau khi đổi IP: cập nhật URL trên ESP32 (trang `/setup` hoặc lệnh `/url`), hoặc
+để discovery UDP tự cập nhật khi server phát `FACESYNC|SERVER|...`.
 
 ### Một trang đăng nhập duy nhất
 

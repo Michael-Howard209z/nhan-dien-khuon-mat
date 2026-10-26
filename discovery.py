@@ -80,36 +80,53 @@ def _best_local_ip(candidates: list) -> str | None:
     return None
 
 
-def local_ip_for(peer_ip: str | None = None) -> str:
+def local_ip_for(peer_ip: str | None = None) -> str | None:
     """IP địa phương sẽ dùng để nói chuyện với ``peer_ip``.
 
     Thủ thuật chuẩn: tạo socket UDP, ``connect()`` (không gửi packet nào) rồi đọc
     ``getsockname()`` -> hệ điều chọn đúng interface đi tới peer. Không cần quét
     mạng, không đoán, và tự đúng kể cả khi máy có VPN / nhiều card mạng.
+
+    Trả về ``None`` nếu không tìm được IP LAN thật -> người gọi PHAI bo qua
+    (khong bao gui). **Khong bao gio tra 127.0.0.1**: neu gui loopback thi
+    ESP32 se luu no vao NVS va POST anh vao chinh no -> he thong "ngu" ma
+    heartbeat van bao online (da xay ra that trong log 2026-10-26).
     """
+    cands: list[str] = []
+
+    # Thu tung peer: IP camera (neu biet) truoc, sau do mot IP ngoai de
+    # chon dung interface mac dinh. UDP connect() KHONG gui goi nao, chi chon
+    # duong -> van hoat dong khi may khong co Internet.
+    peers: list[str] = []
     if peer_ip and _is_private_ipv4(peer_ip):
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        peers.append(peer_ip)
+    peers.append("8.8.8.8")                 # chi dung de doc interface, khong goi
+    for peer in peers:
+        # Deo bao toan: ham nay chay trong thread nen. Neu socket() hoac
+        # connect() loi ma khong bat -> discovery "chet" mot cach yen lan.
+        s = None
         try:
-            s.connect((peer_ip, 9))          # port 9 (discard) - không gửi gì
-            ip = s.getsockname()[0]
-            if _is_private_ipv4(ip):
-                return ip
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect((peer, 9))            # port 9 (discard) - không gửi gì
+            cands.append(s.getsockname()[0])
         except OSError:
             pass
         finally:
-            s.close()
+            if s is not None:
+                try:
+                    s.close()
+                except OSError:
+                    pass
 
-    # Dự phòng: lấy IPv4 của hostname (bỏ loopback, ưu tiên dải LAN thật,
-    # không lấy địa chỉ VPN như 26.x / 100.64.x).
+    # Du phong: IPv4 cua hostname (thuong tra 127.0.0.1 tren Linux -> loc bo).
     try:
-        ips = [info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None,
-                                                         socket.AF_INET)]
-        picked = _best_local_ip(ips)
-        if picked:
-            return picked
+        cands += [info[4][0] for info in socket.getaddrinfo(socket.gethostname(), None,
+                                                            socket.AF_INET)]
     except OSError:
         pass
-    return "127.0.0.1"
+
+    # _best_local_ip da loai loopback / APIPA / VPN; tra ve None neu khong con gi.
+    return _best_local_ip(cands)
 
 
 class DiscoveryService:
@@ -177,15 +194,23 @@ class DiscoveryService:
         self._broadcast(self._server_url())
 
     #bên trong 
-    def _server_url(self) -> str:
+    def _server_url(self) -> str | None:
         # GUI DAY DU endpoint (khong chi host:port): ESP32 dung truc tiep lam
         # push_url. Neu chi gui "http://ip:5001" thi khi nhan vao NVS se MAT
         # duong dan "/api/esp32/frame" -> POST anh loi 404 (heartbeat van chay
         # vi heartbeatPoll dung path co dinh).
-        return (f"http://{local_ip_for(self._last_camera_ip)}"
-                f":{self._camera_port}/api/esp32/frame")
+        #
+        # Tra ve None neu khong xac dinh duoc IP LAN -> PHAI khong gui gi ca.
+        # Gui mot URL sai (127.0.0.1, APIPA...) anh huong TOAN CAU vi ESP32 LUU
+        # no vao NVS va se khong doi lai khi van "online".
+        ip = local_ip_for(self._last_camera_ip)
+        if not ip:
+            return None
+        return f"http://{ip}:{self._camera_port}/api/esp32/frame"
 
-    def _broadcast(self, payload: str) -> None:
+    def _broadcast(self, payload: str | None) -> None:
+        if not payload:
+            return                      # khong xac dinh duoc IP -> im, khong gui loi
         sock = self._sock
         if not sock:
             return
@@ -223,6 +248,13 @@ class DiscoveryService:
             url = self._server_url()
             _log(f"ESP32 hoi (mode={fields[2] if len(fields) > 2 else '?'} "
                  f"tu {ip}) -> tra loi {url}")
+            if not url:
+                # Khong xac dinh duoc IP LAN -> KHONG tra loi. Tra loi mot URL
+                # sai se lam ESP32 luu vao NVS va POST anh vao chu no.
+                _log("khong xac dinh duoc IP LAN -> khong tra loi (neu van loi "
+                     "hien `ip a`, khong cho DNS/hostname ra 127.0.0.1)")
+                self._note_camera(ip, fields[2] if len(fields) > 2 else "")
+                return
             try:
                 if self._sock:
                     self._sock.sendto(f"{PROTO}|SERVER|{url}".encode(),
@@ -260,7 +292,12 @@ class DiscoveryService:
             now = time.time()
             if now - last_announce >= self._announce_every:
                 last_announce = now
-                self._broadcast(f"{PROTO}|SERVER|{self._server_url()}")
+                try:
+                    url = self._server_url()  # None = khong xac dinh duoc IP LAN
+                    if url:
+                        self._broadcast(f"{PROTO}|SERVER|{url}")
+                except Exception as exc:  # noqa: BLE001 - thread nen khong duoc chet
+                    _log(f"loi broadcast (giu chay tiep): {exc!r}")
             try:
                 raw, addr = self._sock.recvfrom(256)
             except socket.timeout:

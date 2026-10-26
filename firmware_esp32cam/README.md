@@ -158,14 +158,45 @@ Web server trên cổng 80 **vẫn chạy** trong chế độ nút nhấn để 
 
 ### Thang chẩn đoán khi gặp fb NULL (0/3 khung)
 
-**Nguyên nhân thật đã chốt (2026-10-12): `cam_hal: FB-OVF` + `fb_get` NULL 4000 ms
-là do bật log driver camera VERBOSE** (`esp_log_level_set(...VERBOSE)` × 5 +
-`Serial.setDebugOutput(true)`): mỗi khung ~25 fps sinh vài dòng log blocking trên
-UART 115200 (~1 ms/dòng) → task camera không trả buffer kịp → driver báo frame
-buffer overflow → chính dòng spam FB-OVF làm nghẹt thêm → `fb_get` timeout.
-Bản tối giản `CamButtonStrip` (không có 2 cài đặt này) chạy tốt trên **cùng** board,
-cùng sensor OV5640, cùng VGA/q12/fb1. Firmware đã tắt lại (`setDebugOutput(false)`,
-không bật VERBOSE) và đưa `CAM_FB_COUNT=1` + `CAM_GRAB_LATEST=0`.
+**Nguyên nhân thật đã chốt (2026-10-26): `camera_config_t config;` không được
+khởi tạo.** Core 3.3.12 thêm các field mới vào struct (`pin_sccb_sda/scl`,
+`sccb_i2c_port`, `jpeg_buffer_size`; `conv_mode` chỉ có khi bật
+`CONFIG_CAMERA_CONVERTER_ENABLED` — build này không bật); firmware cũ không set
+nên chúng chứa rác stack. Driver đọc `jpeg_buffer_size` để quyết định
+`recv_size`/`fb_size`:
+
+```c
+if (config->jpeg_buffer_size > 0) recv_size = config->jpeg_buffer_size;
+else                              recv_size = w * h / 5;
+fb_size = recv_size;
+```
+
+Rác lớn (địa chỉ con trỏ `0x3FFBxxxx` ~ 1.07 tỷ) → `frame buffer malloc failed`;
+rác nhỏ → bộ đệm quá bé → JPEG tràn → `0/3` âm thầm, không log lỗi. Vì layout
+stack cố định theo từng bản build, lỗi biểu hiện "lúc trước chạy được, giờ hỏng"
+và thay đổi ngẫu nhiên giữa các lần build.
+
+**Đã sửa (`2026-10-26-fix1`):**
+
+```cpp
+camera_config_t config = {};   // zero-init TẤT CẢ field
+config.jpeg_buffer_size = 0;   // 0 = driver tự tính w*h/5 (VGA = 61440)
+config.sccb_i2c_port = -1;
+```
+
+**Quy tắc:** mỗi khi nâng core ESP32 hoặc thêm field vào `camera_config_t`,
+giữ `= {}` và set tường minh field mới. Không để biến struct không khởi tạo.
+
+Bằng chứng sau fix: cold boot lần đầu `3/3 khung co frame`, không cần `/cam2`.
+
+**Giả thuyết cũ (đã loại trừ): bật log VERBOSE gây `FB-OVF`.** Trước đây từng
+cho rằng `cam_hal: FB-OVF` + `fb_get` NULL 4000 ms là do bật log driver
+VERBOSE (`esp_log_level_set(...VERBOSE)` × 5 + `Serial.setDebugOutput(true)`):
+mỗi khung ~25 fps sinh vài dòng log blocking trên UART 115200 → task camera
+không trả buffer kịp. Bản tối giản `CamButtonStrip` chạy tốt trên **cùng** board
+vì không bật các cài đặt đó. Đây vẫn là một **yếu tố làm nặng thêm** (nên giữ
+`setDebugOutput(false)`, `CAM_FB_COUNT=1`, `CAM_GRAB_LATEST=0`), nhưng **không
+phải nguyên nhân gốc** của `0/3`.
 
 Nếu sau này cần chẩn đoán lại, chỉ bật log theo **thời điểm** (ngay trước khi
 `fb_get`), không bật VERBOSE suốt dòng:

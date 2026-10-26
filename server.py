@@ -424,6 +424,9 @@ def record_results(results, session_id=None):
             print(f"[log] khong ghi diem danh cho id={sid}: {exc}")
             continue
         if not summary["matched"]:
+            # already=True co 2 nguon, ca hai deu DUNG va khong ghi them dong:
+            #  (a) DB: hoc sinh da diem danh buoi/ngay nay -> info["first"]=False;
+            #  (b) cache scan_sessions: khung lap trong cung 15s (tra som o tren).
             summary.update(
                 matched=1,
                 already=not info.get("first", False),

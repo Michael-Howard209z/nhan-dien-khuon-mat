@@ -42,6 +42,8 @@
 #include <WiFiClientSecure.h>
 #include <DNSServer.h>          // captive portal: phan moi ten ve IP cua minh khi o AP
 #include <esp_heap_caps.h>
+#include "driver/ledc.h"       // dat XCLK TRUOC khi tha PWDN (xem camStartXclkEarly)
+#include "driver/gpio.h"       // gpio_get_level: do truc tiep VSYNC/HREF/PCLK tai /camdiag
 #include "app_config.h"         // cau hinh persistent (NVS): WiFi, IP tinh, server, huong cam
 #include <WiFiUdp.h>            // phat hien server qua UDP broadcast (khong can IP server)
 // Select camera model in board_config.h
@@ -81,7 +83,7 @@ static DNSServer dnsServer;
 
 #define BUTTON_ENABLE     1       // 1 = che do nut nhan (cam OFF khi nghi, nhan nut = truyen anh 15s)
                                   // 0 = quay lai che do cu (PULL/PUSH lien tuc, cam luon bat)
-#define FW_VERSION "2026-10-20-pwdn2-nodeinit"  // in ra Serial luc boot de biet board dang chay ban nao
+#define FW_VERSION "2026-10-26-fix1"  // in ra Serial luc boot de biet board dang chay ban nao
 // --- Tu tim IP server qua UDP broadcast (xem them o phan DISC duoi day) ---
 //  1 = MOI (khuyen dung): server phat "FACESYNC|SERVER|http://ip:5001" ra mang,
 //      ESP32 tu doi URL khi server doi IP. Khong anh huong gi den camera.
@@ -212,8 +214,62 @@ static void discSendNow(const char *payload) {
 
 // Server dang bao: "minh la http://<ip>:5001[/api/esp32/frame]" -> neu ESP32 dang
 // OFFLINE va url khac url hien tai thi chuyen sang url moi (luu NVS).
+// Kiem tra host trong URL co phai dia chi IPv4 LAN hop le khong.
+//
+// *** HANG PHONG THU QUAN TRONG NHAT CUA DISCOVERY ***
+// Log 2026-10-26: server da tung broadcast "http://127.0.0.1:5001/..." va ESP32
+// da LUU no vao NVS. 127.0.0.1 la loopback = chinh ESP32 -> POST anh vao chinh
+// no -> he thong "ngu" ma heartbeat van bao ONLINE (heartbeat dung path co dinh),
+// rat kho phat hien. Chi may ma server tu sua lai bang goi sau do.
+//
+// Vi vay: TU CHOI moi URL ma host khong phai IP LAN that su, truoc khi cham vao
+// NVS. Server co loi hoac co script khac cung broadcast cung khong xong.
+//  - 127.x  -> loopback (bui "ngu" ngay lap tuc)
+//  - 0.x    -> "khong xac dinh" / loi parse
+//  - 169.254-> APIPA (router chua cap IP)
+//  - >=224  -> multicast / reserved
+//  - khong du 4 octet hoac co chu cai -> khong phai IP
+static bool discHostIsLan(const char *url) {
+  if (!url || !*url) return false;
+  const char *p = strstr(url, "://");
+  const char *h = p ? p + 3 : url;
+  if (!*h) return false;
+
+  int o[4] = {0, 0, 0, 0};
+  int n = 0, cur = 0, digits = 0;
+  for (const char *q = h; *q && n < 4; q++) {
+    char c = *q;
+    if (c >= '0' && c <= '9') {
+      cur = cur * 10 + (c - '0');
+      digits++;
+      if (cur > 255 || digits > 3) return false;       // octet qua lon / qua nhieu chu so
+    } else if (c == '.') {
+      if (digits == 0) return false;                   // co "." rong -> sai dinh dang
+      o[n++] = cur; cur = 0; digits = 0;
+    } else {
+      break;   // het host (gap ':' port, '/' path, '?' query...)
+    }
+  }
+  if (digits == 0) return false;                       // thieu octet cuoi
+  o[n++] = cur;
+  if (n != 4) return false;                            // khong du 4 octet -> khong phai IP
+
+  if (o[0] == 127 || o[0] == 0) return false;          // loopback / "khong xac dinh"
+  if (o[0] == 169 && o[1] == 254) return false;        // APIPA
+  if (o[0] >= 224) return false;                       // multicast / reserved
+  return (o[0] == 10)
+      || (o[0] == 192 && o[1] == 168)
+      || (o[0] == 172 && o[1] >= 16 && o[1] <= 31);    // chi d LAN RFC1918
+}
+
 static void discOnServerUrl(const char *url) {
   if (!url || !*url) return;
+
+  // KIEM TRA TRUOC CAU HINH - chi nhan URL co host la IP LAN.
+  if (!discHostIsLan(url)) {
+    Serial.printf("[DISC] BO QUA URL khong hop le (khong phai IP LAN): %s\n", url);
+    return;
+  }
 
   // CHAN DOAN: server co the chi gui "http://ip:port" (ban server cu / server
   // khac). Neu bo nguyen vao NVS thi se MAT duong dan "/api/esp32/frame" ->
@@ -755,9 +811,59 @@ static void push_task(void *arg) {
 
 static volatile bool g_cam_waking = false;  // chan 2 task cung luc init camera
 
+// ============================================================================
+//  BAT XCLK TRUOC KHI THA PWDN (chu ky dung cua cam bien anh)
+//
+//  Doan nay sua NGUYEN NHAN GOC sau rat nhieu lan doan (2026-10-19..26):
+//  "doc duoc sensor PID 0x5640 nhung khong xuat frame nao" (fb_get NULL 4000ms).
+//
+//  XCLK (chan GPIO0 tren AI-Thinker) duoc esp_camera_init() bat TUONG UNG TRONG
+//  luc no chay. Neu ta cat/cap nguon sensor (PWDN) TRUOC luc do thi sensor len
+//  nguon trong khi KHONG CO DONG HO:
+//    - SCCB/I2C van doc duoc PID (OV5640 co dong ho noi bo cho bus)   -> PID OK
+//    - nhung PLL cua sensor khong khoa duoc tu XVCLK -> khong co xuat anh
+//      -> esp_camera_fb_get() het timeout 4000ms -> NULL
+//  Do chinh la tai sao "nguon tot, PID dung, van khong co khung".
+//
+//  Cach dung: dat XCLK TRUOC (dung chinh LEDC_TIMER_0 + LEDC_CHANNEL_0 ma
+//  esp_camera_init se dung, 20MHz, duty 1/1bit = 50%) -> roi moi tha PWDN.
+//  Luc esp_camera_init() chay no se cau hinh lai LEDC voi CUNG tham so
+//  -> khong co xung dong, khong anh huong gi.
+//
+//  Chu ky dung: XCLK on dinh  -> PWDN HIGH (tat) -> PWDN LOW (sensor len
+//  nguon DA CO DONG HO) -> cho on dinh -> init I2C/cau hinh.
+// ============================================================================
+static void camStartXclkEarly() {
+  ledc_timer_config_t t = {};
+  t.speed_mode = LEDC_LOW_SPEED_MODE;
+  t.duty_resolution = LEDC_TIMER_1_BIT;
+  t.timer_num = LEDC_TIMER_0;
+  t.freq_hz = 20000000;                 // 20MHz - giong camera_config_t.xclk_freq_hz
+  t.clk_cfg = LEDC_AUTO_CLK;
+  if (ledc_timer_config(&t) != ESP_OK) {
+    Serial.println("[CAM] loi cau hinh LEDC timer cho XCLK som");
+    return;
+  }
+  ledc_channel_config_t c = {};
+  c.gpio_num = XCLK_GPIO_NUM;
+  c.speed_mode = LEDC_LOW_SPEED_MODE;
+  c.channel = LEDC_CHANNEL_0;
+  c.intr_type = LEDC_INTR_DISABLE;      // KHONG bat ngat - esp_camera_init se quan ly
+  c.timer_sel = LEDC_TIMER_0;
+  c.duty = 1;                           // 50% khi LEDC_TIMER_1_BIT (giong driver)
+  c.hpoint = 0;
+  if (ledc_channel_config(&c) != ESP_OK) {
+    Serial.println("[CAM] loi cau hinh LEDC channel cho XCLK som");
+    return;
+  }
+  Serial.printf("[CAM] da bat XCLK som (%u Hz, chay TRUOC khi tha PWDN)\n",
+                (unsigned)20000000);
+}
+
 // Noi dung init duoc tach tu setup() cu, chay duoc nhieu lan
 static bool camWakeInit() {
 #if defined(PWDN_GPIO_NUM) && (PWDN_GPIO_NUM >= 0)
+  camStartXclkEarly();    // BAT DONG HO TRUOC - khong de sensor len nguon khong XCLK
   // CAP NGUON LAI SENSOR (PWDN) 2 LAN TRUOC MOI LAN INIT - khong chi dat LOW.
   //
   // NGUYEN NHAN GOC (chung minh bang log Serial 2026-10-19/20):
@@ -785,7 +891,21 @@ static bool camWakeInit() {
   delay(300);
 #endif
 
-  camera_config_t config;
+  // *** FIX QUAN TRONG 2026-10-26: ZERO-INIT TOAN BO STRUCT ***
+  // Truoc day: `camera_config_t config;` = bien stack KHONG khoi tao.
+  // Core 3.3.12 them cac field moi vao cuoi struct: jpeg_buffer_size,
+  // sccb_i2c_port, conv_mode. Firmware khong set -> chung chua RAC STACK.
+  // Driver cam_config() doc:
+  //     if (config->jpeg_buffer_size > 0) recv_size = config->jpeg_buffer_size;
+  //     else                              recv_size = w*h/5;
+  //     fb_size = recv_size;
+  // RAC thuong la dia chi con tro (0x3FFBxxxx ~ 1.07 ty) -> recv_size khong lo
+  // -> "frame buffer malloc failed" (da thay trong log). Rac nho -> bo dem qua
+  // be -> JPEG tran -> 0/3 am tham. Doi layout stack (them code) -> doi rac ->
+  // "luc truoc chay duoc, gio hong". Day chinh la nguyen nhan goc.
+  camera_config_t config = {};             // <-- zero-init TAT CA field
+  config.jpeg_buffer_size = 0;             // 0 = driver tu tinh w*h/5 (VGA=61440)
+  config.sccb_i2c_port = -1;               // dung chan SDA/SCL ben duoi
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer = LEDC_TIMER_0;
   config.pin_d0 = Y2_GPIO_NUM;
@@ -995,19 +1115,30 @@ static int camWarmupRecover() {
   //   bo dem DMA noi bo (doan ghi chu tai camSleep() cua du an da canh bao truoc).
   //   Nguoc lai: init KHONG qua deinit luon thanh cong (xem log: lan /cam2).
   //
-  // Vay recovery chi duoc phep cat/cap nguon sensor qua PWDN. Driver camera
-  // van giu nguyen -> khong dot phat DMA, khong brick.
+  // PHAN NHANH THEO g_cam_on (sua 2026-10-26):
+  //  - g_cam_on == false (driver chua init / init loi): cat/cap PWDN + camWake()
+  //    -> camWakeInit() init lai -> duong NAY da chung minh 3/3 (lan /cam2).
+  //  - g_cam_on == true (driver dang chay nhung khong xuat khung): KHONG cat
+  //    nguon. Cat nguon sensor luc driver dang chay se MAT cau hinh VGA/JPEG
+  //    da set luc init va khong the init lai duong dan on dinh (deinit bi loi)
+  //    -> chi RESET board de init lai tu dau la duong duy nhat an toan.
+  if (g_cam_on) {
+    Serial.println("[CAM] Driver DANG CHAY nhung khong xuat khung (khong cat nguon).");
+    Serial.println("[CAM] KHONG cat PWDN luc driver dang chay (se mat cau hinh VGA/JPEG).");
+    Serial.println("[CAM] Hay RESET board de init lai tu dau (nut Reset hoac cat/bat nguon).");
+    return 0;
+  }
+
   Serial.println("[CAM] 0/3 khung -> CAT/ CAP NGUON SENSOR QUA PWDN (KHONG deinit)...");
 #if defined(PWDN_GPIO_NUM) && (PWDN_GPIO_NUM >= 0)
+  pinMode(PWDN_GPIO_NUM, OUTPUT);
   digitalWrite(PWDN_GPIO_NUM, HIGH);   // TAT nguon sensor
   delay(600);
   digitalWrite(PWDN_GPIO_NUM, LOW);    // MO lai
   delay(300);
 #endif
-  // Neu driver chua init (g_cam_on=false: luc nay esp_camera_init() chua
-  // tung chay hoac da loi) thi camWake() se init - va camWakeInit() van co
-  // san chuoi PWDN rieng. Neu driver dang chay thi camWake() tra ve true
-  // ngay, khong deinit gi ca -> chi reset sensor la driver tiep tuc nhan khung.
+  // Driver chua init (g_cam_on=false) -> camWake() se init (camWakeInit co
+  // chuoi PWDN rieng) va day la duong da chung minh 3/3 khung (lan /cam2).
   if (!camWake()) {
     Serial.println("[CAM] LOI: khong init duoc sensor sau cap nguon lai");
     return 0;
@@ -1509,7 +1640,7 @@ static void serialHandleCmd(char *line) {
       // Luc boot OV5640 thuong bi treo (doc duoc PID nhung khong xuat frame).
       // Tu cap nguon lai qua PWDN roi thu lai - khong can gao /cam2 nua.
       ok = camWarmupRecover();
-      Serial.printf("[CAM] KET QUA sau cap nguon lai: %d/3 khung\n", ok);
+      Serial.printf("[CAM] KET QUA sau recovery: %d/3 khung\n", ok);
     }
     Serial.printf("[CAM] KET QUA: %d/3 khung co frame -> %s\n", ok,
                   ok ? "camera TOT, loi o phan mang/server"
@@ -1517,12 +1648,18 @@ static void serialHandleCmd(char *line) {
     return;
   }
   if (strcmp(line, "/camlog") == 0) {
-    // MO log VERBOSE cua driver camera MOT LAN de xem DRIVER noi dung gi khi
-    // fb_get() tra NULL (cam_hal / ll_cam / cam_config se in ro nguyen nhan:
-    // FB-OVF, sai xclk, sensor khong tra du lieu, DMA loi...).
-    // Chi dung de CHAN DOAN. Xong se tat lai ngay (vi VERBOSE spam -> FB-OVF).
-    Serial.println("[CAM] === MO LOG DRIVER CAMERA (1 lan chan doan) ===");
-    Serial.println("[CAM] Doc cac dong sau (thuong co 'cam_hal:' hay 'll_cam:'):");
+    // *** CANH BAO TRUNG THUC (phan tich 2026-10-26): /camlog KHONG con hieu qua ***
+    // Lib esp32-camera precompiled voi CONFIG_LOG_MAXIMUM_LEVEL=1 (chi ERROR):
+    //   esp_log_level.h:  #define ESP_LOG_ENABLED(c) (LOG_LOCAL_LEVEL >= cap)
+    //   cam_hal.c goi ESP_LOGW(=2)/ESP_LOGI(->3) -> 1 >= 2 = FALSE -> BI BIEN DIET
+    //   ngay luc bien dich. esp_log_level_set() chi la phan runtime, khong the
+    //   hoi sinh cac loi da bi bo qua. Cac cau can thiet nhat (NO-SOI, NO-EOI,
+    //   EV-EOF-OVF, "Failed to get frame: timeout") nen KHONG BAO GIO in.
+    // Van chay thu de xac minh (chi con ESP_LOGE), nhung muon chan doan that su
+    // hay dung /camdiag: doc I2C truc tiep + do VSYNC/HREF/PCLK, khong qua log.
+    Serial.println("[CAM] === /camlog: chi con hieu voi ESP_LOGE (driver chi loi ERROR) ===");
+    Serial.println("[CAM] LOG WARN/INFO cua driver da BI BIEN DIET luc build (MAX_LEVEL=1).");
+    Serial.println("[CAM] GO /camdiag DE CHAN DOAN THAT SU.");
     esp_log_level_set("*", ESP_LOG_NONE);                 // tat het truoc
     esp_log_level_set("cam_hal", ESP_LOG_VERBOSE);
     esp_log_level_set("ll_cam", ESP_LOG_VERBOSE);
@@ -1542,6 +1679,200 @@ static void serialHandleCmd(char *line) {
     Serial.println("[CAM] === DONG LOG CHAN DOAN (da tat VERBOSE) ===");
     return;
   }
+
+  if (strcmp(line, "/camdiag") == 0) {
+    // ==========================================================================
+    //  CHAN DOAN TRUC TIEP - khong dua vao log cua driver (vi no da bien mat)
+    //
+    //  3 cau hoi can tra loi, bang cach doc I2C va do cap GPIO truc tiep:
+    //   (1) Sensor co DANG CHAY khong? -> doc 0x3008 (02=chay, 42=standby)
+    //   (2) Sensor co XUAT VSYNC khong? -> gpio_get_level(25) nhap nhay ~30-60 lan/s
+    //       va xem 0x4740/0x4741 co DAO CUC VSYNC/PCLK khong: dao cuc thi ESP32
+    //       khong thay canh -> khong bao gio nhan su kien -> 0/3 MA KHONG CO LOI GI.
+    //   (3) Chuoi JPEG co chay khong? -> bat colorbar (0x503D=0x80):
+    //       colorbar van 0/3 -> loi o cap xuong (sensor/DVP khong dua du lieu)
+    //       colorbar -> 3/3     -> sensor va DVP TOT, loi o khung anh that
+    // ==========================================================================
+    if (!camWake()) {
+      Serial.println("[DIAG] khong wake duoc camera -> khong chan doan tiep duoc");
+      return;
+    }
+    sensor_t *s = esp_camera_sensor_get();
+    if (!s) {
+      Serial.println("[DIAG] sensor NULL");
+      return;
+    }
+
+    Serial.println("[DIAG] ================== /camdiag ==================");
+    Serial.printf("[DIAG] PID=0x%04X  framesize=%d  pixformat=%d  quality=%d\n",
+                  (unsigned)s->id.PID, (int)s->status.framesize,
+                  (int)s->pixformat, (int)s->status.quality);
+    Serial.printf("[DIAG] co khung trong hang: %s\n",
+                  esp_camera_available_frames() ? "CO" : "KHONG");
+
+    // (1) doc register quan trong cua OV5640 qua SCCB truc tiep
+    static const struct { uint16_t reg; const char *note; } regs[] = {
+      {0x3008, "02=chay, 42=standby, 82=sleep"},
+      {0x3000, "00 = mo sensor"},
+      {0x3004, "mo xuat anh"},
+      {0x3005, "chuc nang xuat"},
+      {0x3108, "chia PCLK"},
+      {0x3035, "PLL ty so truoc"},
+      {0x3036, "PLL bo nhan (4C=6x, 64=8x)"},
+      {0x3820, "timing (bit1=VFLIP)"},
+      {0x3821, "timing (bit1=HMIRROR)"},
+      {0x4300, "dinh dang (68=YUV, 10=RAW, 30=RGB)"},
+      {0x4740, "<= DAO CUC: 00=thuong, 40=dao VSYNC"},
+      {0x4741, "<= DAO CUC: dao PCLK/HREF"},
+      {0x4744, "<= DAO CUC nhung dieu kien"},
+      {0x503D, "colorbar (80=dang BAT, 00=TAT)"},
+    };
+    for (size_t i = 0; i < sizeof(regs) / sizeof(regs[0]); i++) {
+      int v = (s->get_reg) ? s->get_reg(s, regs[i].reg, 0xFF) : -1;
+      if (v < 0) {
+        Serial.printf("[DIAG]   0x%04X = doc LOI           ; %s\n",
+                      regs[i].reg, regs[i].note);
+      } else {
+        Serial.printf("[DIAG]   0x%04X = 0x%02X           ; %s\n",
+                      regs[i].reg, v & 0xFF, regs[i].note);
+      }
+    }
+
+    // (1b) doc cac register JPEG con thieu - xem chuoi JPEG duoc bat day du khong
+    static const struct { uint16_t reg; uint8_t exp; const char *note; } jregs[] = {
+      {0x3034, 0x1A, "10-bit mode (set_pll luon ghi 1A)"},
+      {0x3037, 0x02, "PLL pre-div=2, root_2x=0 (set_pll ghi (2&0xf)|0 = 02)"},
+      {0x3039, 0x00, "PLLs bypass = 0 (dang dung PLL)"},
+      {0x3103, 0x13, "system clock tu PLL (bit1=1)"},
+      {0x3824, 0x04, "PCLK_RATIO = pclk_div (JPEG = 4)"},
+      {0x460C, 0x22, "VFIFO: PCLK manual + footer off (JPEG = 22)"},
+      {0x471C, 0x50, "JPEG dong goi (sensor_fmt_jpeg = 50)"},
+      {0x501F, 0x00, "Format select: 00 = YUV422/JPEG"},
+      {0x4407, 0x0C, "JPEG quality QS (set_quality 12 = 0C)"},
+    };
+    for (size_t i = 0; i < sizeof(jregs) / sizeof(jregs[0]); i++) {
+      int v = (s->get_reg) ? s->get_reg(s, jregs[i].reg, 0xFF) : -1;
+      if (v < 0) {
+        Serial.printf("[DIAG]   0x%04X = doc LOI        ; %s\n", jregs[i].reg, jregs[i].note);
+      } else {
+        Serial.printf("[DIAG]   0x%04X = 0x%02X (ky vong 0x%02X)%s ; %s\n",
+                      jregs[i].reg, v & 0xFF, jregs[i].exp,
+                      ((v & 0xFF) == jregs[i].exp) ? " " : " <-- LECH!", jregs[i].note);
+      }
+    }
+
+    // (2a) VONG CHAM (delay 1ms) - cho VSYNC/HREF (tan so thap ~13-30Hz) dung hon
+    //      + XCLK lam CHAN DIEU KHIEN: neu XCLK cung it canh -> gpio_get_level doc
+    //      khong duoc chan driver -> PCLK=10 la SAO (khong tin duoc); neu XCLK nhieu
+    //      canh ma PCLK it -> PCLK THAT SU CHET.
+    Serial.println("[DIAG] --- vong CHAM 300ms (XCLK=GPIO0 la control, VSYNC=25, HREF=23, PCLK=22) ---");
+    int lv = gpio_get_level((gpio_num_t)VSYNC_GPIO_NUM);
+    int lh = gpio_get_level((gpio_num_t)HREF_GPIO_NUM);
+    int lp = gpio_get_level((gpio_num_t)PCLK_GPIO_NUM);
+    int lx = gpio_get_level((gpio_num_t)XCLK_GPIO_NUM);
+    int vs_e = 0, hr_e = 0, pk_e = 0, xk_e = 0, vs_hi = 0, hr_hi = 0, xk_hi = 0;
+    uint32_t t0 = millis();
+    for (int i = 0; i < 300; i++) {
+      int v = gpio_get_level((gpio_num_t)VSYNC_GPIO_NUM);
+      int h = gpio_get_level((gpio_num_t)HREF_GPIO_NUM);
+      int p = gpio_get_level((gpio_num_t)PCLK_GPIO_NUM);
+      int x = gpio_get_level((gpio_num_t)XCLK_GPIO_NUM);
+      if (v != lv) { vs_e++; lv = v; if (v) vs_hi++; }
+      if (h != lh) { hr_e++; lh = h; if (h) hr_hi++; }
+      if (p != lp) { pk_e++; lp = p; }
+      if (x != lx) { xk_e++; lx = x; if (x) xk_hi++; }
+      delay(1);
+    }
+    Serial.printf("[DIAG]   sau %ums: XCLK edges=%d (control!) | VSYNC=%d (len=%d) | HREF=%d (len=%d) | PCLK=%d\n",
+                  (unsigned)(millis() - t0), xk_e, vs_e, vs_hi, hr_e, hr_hi, pk_e);
+
+    // (2b) VONG NHANH (khong delay) - do XCLK/PCLK cho chu xac, tranh alias 900Hz
+    //      vs 11-20MHz. Cang nhieu canh cang tot; PCLK ~ 1/2 XCLK la binh thuong.
+    Serial.println("[DIAG] --- vong NHANH khong delay (do XCLK vs PCLK cho chu) ---");
+    lx = gpio_get_level((gpio_num_t)XCLK_GPIO_NUM);
+    lp = gpio_get_level((gpio_num_t)PCLK_GPIO_NUM);
+    int xk_f = 0, pk_f = 0;
+    t0 = micros();
+    for (int i = 0; i < 40000; i++) {
+      int x = gpio_get_level((gpio_num_t)XCLK_GPIO_NUM);
+      int p = gpio_get_level((gpio_num_t)PCLK_GPIO_NUM);
+      if (x != lx) { xk_f++; lx = x; }
+      if (p != lp) { pk_f++; lp = p; }
+    }
+    uint32_t dtus = micros() - t0;
+    Serial.printf("[DIAG]   sau %uus: XCLK canh=%u | PCLK canh=%u (PCLK/XCLK = %.2f)\n",
+                  (unsigned)dtus, (unsigned)xk_f, (unsigned)pk_f,
+                  (xk_f > 0) ? (float)pk_f / (float)xk_f : 0.0f);
+
+    // (2c) BUS DU LIEU Y2..Y9 - nguyen nhan "truoc chay duoc gio loi": neu 1 chan
+    //      du lieu bi KE (FPC lung / han nguoi / chan do), moi byte JPEG bi hong ->
+    //      driver soi SOI (FF D8) that bai -> frame bi drop IM LAP (log da bien diet)
+    //      -> 0/3 khong co loi gi. Chan song dao dong hang NGHIN lan; chan ke ~0 canh.
+    static const struct { gpio_num_t pin; const char *name; } ypins[] = {
+      {(gpio_num_t)Y2_GPIO_NUM, "Y2/GPIO5"},  {(gpio_num_t)Y3_GPIO_NUM, "Y3/GPIO18"},
+      {(gpio_num_t)Y4_GPIO_NUM, "Y4/GPIO19"}, {(gpio_num_t)Y5_GPIO_NUM, "Y5/GPIO21"},
+      {(gpio_num_t)Y6_GPIO_NUM, "Y6/GPIO36"}, {(gpio_num_t)Y7_GPIO_NUM, "Y7/GPIO39"},
+      {(gpio_num_t)Y8_GPIO_NUM, "Y8/GPIO34"}, {(gpio_num_t)Y9_GPIO_NUM, "Y9/GPIO35"},
+    };
+    const int NYP = 8;
+    int ylast[8], yedge[8];
+    for (int k = 0; k < NYP; k++) { ylast[k] = gpio_get_level(ypins[k].pin); yedge[k] = 0; }
+    Serial.printf("[DIAG] --- bus du lieu Y2..Y9 (vong nhanh, ~%uus) ---\n", (unsigned)14000);
+    t0 = micros();
+    for (int i = 0; i < 40000; i++) {
+      for (int k = 0; k < NYP; k++) {
+        int v = gpio_get_level(ypins[k].pin);
+        if (v != ylast[k]) { yedge[k]++; ylast[k] = v; }
+      }
+    }
+    dtus = micros() - t0;
+    int ymax = 0, ymin = 1 << 30, ymini = 0;
+    for (int k = 0; k < NYP; k++) {
+      if (yedge[k] > ymax) ymax = yedge[k];
+      if (yedge[k] < ymin) { ymin = yedge[k]; ymini = k; }
+    }
+    for (int k = 0; k < NYP; k++) {
+      Serial.printf("[DIAG]   %s canh=%-6d%s\n", ypins[k].name, yedge[k],
+                    (yedge[k] * 10 < ymax) ? "   <-- GAN NHU KE (chan nay suspect!)" : "");
+    }
+    Serial.printf("[DIAG]   nhan xet: min=%s (%d canh) / max=%d canh. Neu min ~0 va max nhieu -> CO CHAN DU LIEU KE.\n",
+                  ypins[ymini].name, ymin, ymax);
+    if (ymin > ymax / 20) {
+      Serial.println("[DIAG]   Tat ca 8 chan deu dao dong -> bus du lieu TOT, loi khong phai FPC/chan do.");
+    }
+
+    // (3) test colorbar: doi noi dung anh nhung van phai la JPEG hop le
+    Serial.println("[DIAG] --- test colorbar ---");
+    Serial.printf("[DIAG] truoc colorbar  : %d/3 khung\n", camWarmup());
+
+    if (s->set_colorbar) {
+      s->set_colorbar(s, 1);
+      int cb = (s->get_reg) ? s->get_reg(s, 0x503D, 0xFF) : -1;
+      Serial.printf("[DIAG] da bat colorbar (0x503D doc lai = 0x%02X)\n", cb & 0xFF);
+      delay(300);
+      Serial.printf("[DIAG] colorbar BAT    : %d/3 khung\n", camWarmup());
+
+      s->set_colorbar(s, 0);
+      cb = (s->get_reg) ? s->get_reg(s, 0x503D, 0xFF) : -1;
+      Serial.printf("[DIAG] da tat colorbar (0x503D doc lai = 0x%02X)\n", cb & 0xFF);
+      delay(300);
+      Serial.printf("[DIAG] colorbar TAT    : %d/3 khung\n", camWarmup());
+    } else {
+      Serial.println("[DIAG] sensor khong ho tro set_colorbar -> bo qua buoc nay");
+    }
+
+    Serial.println("[DIAG] --------- CACH DOC KET QUA ---------");
+    Serial.println("[DIAG] XCLK~20MHz + PCLK/XCLK~0.3-0.5 -> PLL LOCK, PCLK DUNG. Sensor TOT.");
+    Serial.println("[DIAG]   (vong cham do PCLK=10 la SAO do alias 900Hz - KHONG tin vong cham)");
+    Serial.println("[DIAG] 0x3037=0x02 la DUNG (set_pll ghi 02) - khong phai LECH");
+    Serial.println("[DIAG] neu CA 8 chan Y2..Y9 deu dao dong -> bus du loi TOT, loi o PHIA ESP32");
+    Serial.println("[DIAG] neu co chan Y nao ~0 canh -> CHAN DO/FPC HONG -> day la nguyen nhan");
+    Serial.println("[DIAG] colorbar BAT van 0/3 + Y ke -> xac nhan loi cap du lieu/chan do");
+    Serial.println("[DIAG] colorbar BAT = 3/3   -> sensor + DVP TOT, loi o khung anh that");
+    Serial.println("[DIAG] ===================================");
+    return;
+  }
+
   if (strcmp(line, "/cam2") == 0) {
     // CAP NGUON LAI SENSOR (chi dung de THU khi /cam tra 0/3).
     //
@@ -1550,14 +1881,14 @@ static void serialHandleCmd(char *line) {
     //   "cam_hal: cam_dma_config(509): frame buffer malloc failed" (0xffffffff),
     //   trong khi CUNG luc do lan khong qua deinit lai init duoc va 3/3 khung.
     // Ly do: deinit khong giai phong sach bo dem DMA noi bo.
-    // Goi chung ham recovery (cat/cap PWDN, driver van giu nguyen) cho an toan.
-    Serial.println("[CAM] Cap nguon lai sensor (PWDN)...");
+    // Goi ham recovery (PHAN NHANH theo g_cam_on): driver chua init thi cat/cap
+    // PWDN + init lai; driver dang chay thi KHONG cat nguon (se mat cau hinh).
     int ok = camWarmupRecover();
-    Serial.printf("[CAM] KET QUA sau cap nguon lai: %d/3 khung\n", ok);
+    Serial.printf("[CAM] KET QUA sau recovery: %d/3 khung\n", ok);
     if (ok == 0) {
-      Serial.println("[CAM] Van 0/3 -> sensor THAT SU khong xuat frame.");
-      Serial.println("[CAM] Kiem tra: (1) cap FPC cam co day khong, (2) nguon 5V/2A,");
-      Serial.println("[CAM] (3) do cung cap duong 5V khi camera bat (dong lon).");
+      Serial.println("[CAM] Van 0/3 -> xem dong tren: neu bao RESET board thi reset");
+      Serial.println("[CAM] (driver dang chay, khong the cat nguon an toan). Neu van 0/3");
+      Serial.println("[CAM] sau reset -> kiem tra: (1) cap FPC cam, (2) nguon 5V/2A.");
     }
     return;
   }
@@ -1566,7 +1897,8 @@ static void serialHandleCmd(char *line) {
     Serial.println("  /url                    - xem URL server dang dung");
     Serial.println("  /url <http://ip:port/duong-dan> - doi + luu URL server (NVS)");
     Serial.println("  /cam                    - kiem tra camera (3 khung) khong can bam nut");
-    Serial.println("  /camlog                 - mo log VERBOSE cua driver camera (chan doan)");
+    Serial.println("  /camlog                 - mo log VERBOSE (chi con ESP_LOGE - xem /camdiag)");
+    Serial.println("  /camdiag                - chan doan truc tiep: doc reg OV5640 + do VSYNC/PCLK + colorbar");
     Serial.println("  /cam2                   - cap nguon lai sensor roi kiem tra lai");
 #if DISCOVERY_ENABLE
     Serial.println("  /disc                   - hoi toan mang 'ai la server?' ngay");
