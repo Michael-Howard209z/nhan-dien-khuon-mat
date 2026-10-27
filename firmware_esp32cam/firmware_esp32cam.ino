@@ -83,7 +83,7 @@ static DNSServer dnsServer;
 
 #define BUTTON_ENABLE     1       // 1 = che do nut nhan (cam OFF khi nghi, nhan nut = truyen anh 15s)
                                   // 0 = quay lai che do cu (PULL/PUSH lien tuc, cam luon bat)
-#define FW_VERSION "2026-10-26-fix1"  // in ra Serial luc boot de biet board dang chay ban nao
+#define FW_VERSION "2026-10-27-lcd1"  // in ra Serial luc boot de biet board dang chay ban nao
 // --- Tu tim IP server qua UDP broadcast (xem them o phan DISC duoi day) ---
 //  1 = MOI (khuyen dung): server phat "FACESYNC|SERVER|http://ip:5001" ra mang,
 //      ESP32 tu doi URL khi server doi IP. Khong anh huong gi den camera.
@@ -158,6 +158,10 @@ static int btn_parse_result(const char *json, int *already, int *faces, int *ids
 static void heartbeatPoll();                       // duy tri ket noi (khong truyen anh) khi cho
 
 static void serialPoll();   // lenh Serial (/url, /help): doi URL server khong can nap lai
+
+// Ket qua nhan dien gan nhat -> man LCD (ESP32-C3 + PCF8574) doc qua GET /result.
+// Dinh nghia trong .ino, app_httpd.cpp goi qua extern.
+size_t buildResultJson(char *out, size_t out_sz);
 
 //Tu tim IP server qua UDP broadcast 
 static uint32_t g_last_hb_ok_ms = 0;   // lan heartbeat thanh cong gan nhat
@@ -326,6 +330,23 @@ static void discRx() {
     if (strncmp(buf, DISC_MAGIC "|", strlen(DISC_MAGIC) + 1) != 0) continue;
     const char *body = buf + strlen(DISC_MAGIC) + 1;
     if (strncmp(body, "SERVER|", 7) == 0) discOnServerUrl(body + 7);
+
+    // Man LCD (ESP32-C3) hoi "cam o IP nao?" -> tra loi truc tiep cho no.
+    // Nho vay LCD khong can biet IP cam tu truoc, cam doi IP (DHCP) van tim duoc.
+    // (Server Python cung nhan goi nay nhung bo qua vi kind khong phai DISCOVER/ESP32.)
+    if (strncmp(body, "CAM?", 4) == 0) {
+      IPAddress from = g_discUdp.remoteIP();     // lay TRUOC khi beginPacket
+      uint16_t fport = g_discUdp.remotePort();
+      char reply[64];
+      int rn = snprintf(reply, sizeof(reply), DISC_MAGIC "|CAM|%s",
+                        WiFi.localIP().toString().c_str());
+      if (g_discUdp.beginPacket(from, fport)) {
+        g_discUdp.write((const uint8_t *)reply, rn);
+        g_discUdp.endPacket();
+        Serial.printf("[DISC] LCD hoi vi tri cam -> tra loi %s cho %s\n",
+                      reply, from.toString().c_str());
+      }
+    }
   }
 }
 
@@ -403,6 +424,161 @@ const char *g_push_url = PUSH_URL;   // se tro sang cfg.push_url sau cfg_load() 
 volatile bool g_server_online = false; // true = server Python dang phan hoi heartbeat (online)
 volatile bool g_is_scanning = false;   // true = dang trong dot truyen anh 15 giay
 volatile uint32_t g_last_heartbeat_ms = 0;   // khong static: ham discovery doc duoc
+
+// ---------------------------------------------------------------------------
+//  KET QUA NHAN DIEN MOI NHAT -> cho MAN LCD (ESP32-C3 + PCF8574 I2C) doc
+// ---------------------------------------------------------------------------
+//  Man LCD KHONG tu nhan dien duoc. No chi DOC ket qua tu ESP32-CAM:
+//
+//      ESP32-C3 --GET http://<ip-cam>/result--> ESP32-CAM (JSON)
+//
+//  Vi vay ESP32-CAM phai luu lai trang thai cua lan bam nut gan nhat.
+//
+//  Da luong: doButtonCapture() chay o task loop(), con /result chay o task
+//  httpd. Dung spinlock (portMUX) bao quanh vung RAT NGAN -> khong bao gio doc
+//  "nua chung" (ten bi cat, lop cua phien truoc...). Trong vung khoa chi co
+//  gan bien + copy chuoi, KHONG co delay/malloc -> khong the gay deadlock.
+static portMUX_TYPE g_resMux = portMUX_INITIALIZER_UNLOCKED;
+
+volatile uint32_t g_res_seq = 0;   // tang 1 moi khi co trang thai MOI (LCD phat hien)
+volatile uint32_t g_res_ms = 0;    // millis() luc cap nhat
+volatile int g_res_status = 0;     // 0 idle, 1 scanning, 2 ok, 3 already,
+                                   // 4 nomatch, 5 camerr, 6 neterr
+volatile int g_res_matched = 0;
+volatile int g_res_already = 0;
+volatile int g_res_faces = -1;     // so mat thay trong khung (-1 = khong ro)
+volatile int g_res_ids = -1;       // so mau da dang ky (-1 = khong ro)
+volatile int g_res_session = 0;    // 1 | 2
+char g_res_name[64] = "";          // UTF-8 day du (LCD tu bo dau tieng Viet)
+char g_res_class[32] = "";
+char g_res_sessname[32] = "";
+
+static const char *resStatusName(int st) {
+  switch (st) {
+    case 1: return "scanning";
+    case 2: return "ok";
+    case 3: return "already";
+    case 4: return "nomatch";
+    case 5: return "camerr";
+    case 6: return "neterr";
+    default: return "idle";
+  }
+}
+
+// Cong bo ket qua moi den man LCD (ESP32-C3 doc qua GET /result).
+// name/klass/sessname = NULL -> xoa trang. Goi o task loop() (doButtonCapture),
+// vung nhom ngan, khong delay/malloc -> khong deadlock voi task httpd.
+static void resPublish(int status, int matched, int already, const char *name,
+                       const char *klass, int session, const char *sessname,
+                       int faces, int ids) {
+  portENTER_CRITICAL(&g_resMux);
+  g_res_status = status;
+  g_res_matched = matched;
+  g_res_already = already;
+  g_res_faces = faces;
+  g_res_ids = ids;
+  g_res_session = session;
+  if (name) { strncpy(g_res_name, name, sizeof(g_res_name) - 1); g_res_name[sizeof(g_res_name) - 1] = '\0'; }
+  else g_res_name[0] = '\0';
+  if (klass) { strncpy(g_res_class, klass, sizeof(g_res_class) - 1); g_res_class[sizeof(g_res_class) - 1] = '\0'; }
+  else g_res_class[0] = '\0';
+  if (sessname) { strncpy(g_res_sessname, sessname, sizeof(g_res_sessname) - 1); g_res_sessname[sizeof(g_res_sessname) - 1] = '\0'; }
+  else g_res_sessname[0] = '\0';
+  g_res_ms = millis();
+  g_res_seq = g_res_seq + 1;   // ghi CUOI: LCD thay seq = du lieu da xong
+  portEXIT_CRITICAL(&g_resMux);
+}
+
+// Doi byte UTF-8 -> ASCII trong chuoi JSON: giu nguyen byte >= 0x20 (tru " va \)
+// de ten tieng Viet con nguyen cho LCD tu bo dau; thay ky tu dieu khien bang ' '.
+static void resJsonEscape(const char *src, char *dst, size_t dst_sz) {
+  size_t k = 0;
+  if (!dst_sz) return;
+  for (const char *p = src ? src : ""; *p && k + 2 < dst_sz; p++) {
+    unsigned char c = (unsigned char)*p;
+    if (c == '"' || c == '\\') { dst[k++] = '\\'; dst[k++] = (char)c; }
+    else if (c < 0x20) { dst[k++] = ' '; }
+    else { dst[k++] = (char)c; }
+  }
+  dst[k] = 0;
+}
+
+// Tao JSON trang thai gan nhat (tra ve so byte, KHONG tinh '\0').
+size_t buildResultJson(char *out, size_t out_sz) {
+  int status, matched, already, faces, ids, session;
+  uint32_t seq, ms;
+  char name[sizeof(g_res_name)], klass[sizeof(g_res_class)], sessname[sizeof(g_res_sessname)];
+  bool scanning;
+  const char *push;
+
+  portENTER_CRITICAL(&g_resMux);
+  status = g_res_status; matched = g_res_matched; already = g_res_already;
+  faces = g_res_faces; ids = g_res_ids; session = g_res_session;
+  seq = g_res_seq; ms = g_res_ms;
+  memcpy(name, g_res_name, sizeof(name));
+  memcpy(klass, g_res_class, sizeof(klass));
+  memcpy(sessname, g_res_sessname, sizeof(sessname));
+  scanning = g_is_scanning;
+  push = g_push_url;
+  portEXIT_CRITICAL(&g_resMux);
+
+  char en[136], ec[68], es[68], ep[136];
+  resJsonEscape(name, en, sizeof(en));
+  resJsonEscape(klass, ec, sizeof(ec));
+  resJsonEscape(sessname, es, sizeof(es));
+  resJsonEscape(push ? push : "", ep, sizeof(ep));
+
+  // 768 byte la du cho truong hop xau nhat (ten 63 + URL 127 + lop/phien dai).
+  if (!out || out_sz < 256) return 0;
+  int n = snprintf(out, out_sz,
+                   "{\"ok\":1,\"fw\":\"" FW_VERSION "\",\"seq\":%u,\"ts_ms\":%u,"
+                   "\"uptime_ms\":%u,\"scanning\":%d,\"status\":\"%s\","
+                   "\"matched\":%d,\"already\":%d,\"faces\":%d,\"ids\":%d,"
+                   "\"full_name\":\"%s\",\"name\":\"%s\",\"class\":\"%s\",\"session\":%d,"
+                   "\"session_name\":\"%s\",\"push\":\"%s\"}",
+                   (unsigned)seq, (unsigned)ms, (unsigned)millis(),
+                   scanning ? 1 : 0, resStatusName(status),
+                   matched, already, faces, ids,
+                   en, en, ec, session, es, ep);
+  if (n < 0) return 0;
+  if ((size_t)n >= out_sz) {
+    // Rat kho xay ra (chi khi ten/URL dai bat thuong) -> JSON toi gian, hop le.
+    return (size_t)snprintf(out, out_sz,
+                            "{\"ok\":1,\"fw\":\"" FW_VERSION "\",\"seq\":%u,\"ts_ms\":%u,"
+                            "\"uptime_ms\":%u,\"scanning\":%d,\"status\":\"%s\","
+                            "\"matched\":%d,\"already\":%d,\"faces\":%d,\"ids\":%d,"
+                            "\"full_name\":\"\",\"name\":\"\",\"class\":\"\",\"session\":0,\"session_name\":\"\"}",
+                            (unsigned)seq, (unsigned)ms, (unsigned)millis(),
+                            scanning ? 1 : 0, resStatusName(status),
+                            matched, already, faces, ids);
+  }
+  return (size_t)n;
+}
+
+// --- Doc truong JSON TOP-LEVEL don gian (server tra ve o muc cao nhat) -------
+// (Khoa chi co chu thuong/so nen strstr la du; khong can thu vien JSON.)
+static bool jsonStrField(const char *json, const char *key, char *out, size_t out_sz) {
+  if (out && out_sz) out[0] = 0;
+  if (!json || !key || !out || !out_sz) return false;
+  char pat[40];
+  snprintf(pat, sizeof(pat), "\"%s\":\"", key);
+  const char *p = strstr(json, pat);
+  if (!p) return false;
+  p += strlen(pat);
+  size_t k = 0;
+  while (*p && *p != '"' && k < out_sz - 1) out[k++] = *p++;
+  out[k] = 0;
+  return true;
+}
+
+static int jsonIntField(const char *json, const char *key, int def) {
+  if (!json || !key) return def;
+  char pat[40];
+  snprintf(pat, sizeof(pat), "\"%s\":", key);
+  const char *p = strstr(json, pat);
+  if (!p) return def;
+  return atoi(p + strlen(pat));
+}
 //Trang thai camera (doc tu app_httpd.cpp) 
 volatile bool g_cam_on = false;         // true = camera da init (che do nguoc: OFF khi nghi)
 volatile bool g_stream_active = false;  // true = stream :81 dang chay (chi de hien thi, camSleep hien la no-op)
@@ -1304,24 +1480,28 @@ static void doButtonCapture() {
   // WiFi chua len -> bao ngay bang 5 nhanh
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("[BTN] loi mang: WiFi CHUA ket noi duoc -> 5 nhanh");
+    resPublish(6, 0, 0, NULL, NULL, 0, NULL, -1, -1);   // LCD: loi mang
     btnBlink(5, 60, 60);
     return;
   }
 
   if (!camWake()) {
     Serial.println("[BTN] loi: khong day duoc camera");
+    resPublish(5, 0, 0, NULL, NULL, 0, NULL, -1, -1);   // LCD: loi camera
     btnBlink(5, 60, 60);
     return;
   }
   g_sleep_req = false;
   if (!push_ensure_buf()) {
     Serial.println("[BTN] loi: khong cap duoc bo dem POST (het RAM/PSRAM)");
+    resPublish(5, 0, 0, NULL, NULL, 0, NULL, -1, -1);   // LCD: loi camera
     btnBlink(5, 60, 60);
     cam_sleep_request();
     return;
   }
 
   g_is_scanning = true;
+  resPublish(1, 0, 0, NULL, NULL, 0, NULL, -1, -1);     // LCD: dang quet
 
   // Tao ma phien session_id duy nhat cho dot 15 giay nay
   char session_id[40];
@@ -1374,6 +1554,7 @@ static void doButtonCapture() {
     camPowerReport();   // in nguyen nhan reset truoc do (co the la SAP NGUON)
     btnLed(false);
     g_is_scanning = false;
+    resPublish(5, 0, 0, NULL, NULL, 0, NULL, -1, -1);   // LCD: camera khong ra khung
     btnBlink(4, 120, 120);
     cam_sleep_request();
     return;
@@ -1442,6 +1623,13 @@ static void doButtonCapture() {
           int matched = btn_parse_result(resp, &already, &faces, &ids,
                                          name, sizeof(name));
 
+          // Cac truong them (man LCD can): lop, buoi. Doc ngay tu JSON phan hoi.
+          char cls[sizeof(g_res_class)] = "";
+          char sname[sizeof(g_res_sessname)] = "";
+          jsonStrField(resp, "class_name", cls, sizeof(cls));
+          jsonStrField(resp, "session_name", sname, sizeof(sname));
+          int ses = jsonIntField(resp, "session", 0);
+
           if (matched && !already) {
             if (best_outcome != 1) {
               best_outcome = 1;
@@ -1450,6 +1638,8 @@ static void doButtonCapture() {
               Serial.printf("[BTN] Khung %d: KHOP -> %s (Diem danh 1 lan cho dot 15s, tiep tuc truyen du 15s)\n",
                             frames, final_name);
             }
+            // Cong bo NGAY (khong doi het 15s) -> man LCD hien ten trong ~0.5s.
+            resPublish(2, 1, 0, final_name, cls, ses, sname, faces, ids);
           } else if (matched && already) {
             if (best_outcome == 0) {
               best_outcome = 2;
@@ -1458,6 +1648,7 @@ static void doButtonCapture() {
               Serial.printf("[BTN] Khung %d: KHOP -> %s (Da diem danh truoc do, tiep tuc truyen du 15s)\n",
                             frames, final_name);
             }
+            resPublish(3, 1, 1, final_name, cls, ses, sname, faces, ids);
           } else if (ids == 0) {
             Serial.printf("[BTN] Khung %d: server CHUA CO MAU MAT NAO\n", frames);
           } else if (faces <= 0) {
@@ -1499,12 +1690,15 @@ static void doButtonCapture() {
     btnBlink(2, 300, 200);            // 2 nhap vua
   } else if (outcome == 4) {
     Serial.println("[BTN] Ket thuc 15s: Loi camera");
+    resPublish(5, 0, 0, NULL, NULL, 0, NULL, -1, -1);   // LCD: loi camera
     btnBlink(4, 120, 120);            // 4 nhap ngan
   } else if (outcome == 5) {
     Serial.println("[BTN] Ket thuc 15s: Loi mang/server");
+    resPublish(6, 0, 0, NULL, NULL, 0, NULL, -1, -1);   // LCD: loi mang/server
     btnBlink(5, 60, 60);              // 5 nhanh
   } else {
     Serial.printf("[BTN] Ket thuc 15s (%d khung): Da truyen du 15s nhung khong khop\n", frames);
+    resPublish(4, 0, 0, NULL, NULL, 0, NULL, -1, -1);   // LCD: khong khop ai
     btnBlink(3, 120, 120);            // 3 nhap ngan
   }
   cam_sleep_request();                // het phien quet

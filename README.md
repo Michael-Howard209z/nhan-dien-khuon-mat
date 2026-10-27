@@ -415,7 +415,7 @@ Tab lạ → về tab đầu tiên của vai trò.
 > `{"ok": false, "error": ...}`; trang/API dành cho vai trò khác trả `302` về trang
 > của chính họ; chưa đăng nhập → về trang đăng nhập.
 
-## 8. ESP32-CAM (firmware trong `CameraWebServer_copy_20261009125906/`)
+## 8. ESP32-CAM (firmware trong `firmware_esp32cam/`)
 
 ### Chế độ nút nhấn (mặc định — chạy thật)
 

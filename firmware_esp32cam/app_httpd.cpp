@@ -87,6 +87,10 @@ extern int g_button_pin;             // GPIO nut nhan (-1 = tat che do nut nhan)
 bool camWake();                      // bat camera (init lai neu can) -> false = loi
 void camSleep();                     // giu nguyen camera (no-op, xem .ino)
 
+// Ket qua nhan dien gan nhat (dinh nghia trong .ino) — cho man LCD ESP32-C3.
+// Man LCD chi DOC ket qua tu day: GET /result -> JSON.
+size_t buildResultJson(char *out, size_t out_sz);
+
 typedef struct {
   size_t size;   //number of values used for filtering
   size_t index;  //current value index
@@ -575,6 +579,19 @@ static esp_err_t status_handler(httpd_req_t *req) {
   httpd_resp_set_type(req, "application/json");
   httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
   return httpd_resp_send(req, json_response, strlen(json_response));
+}
+
+// GET /result -> JSON trang thai nhan dien gan nhat, danh cho man LCD
+// (ESP32-C3 + PCF8574). Khong can dang nhap, khong dung camera -> co the goi
+// lien tuc ca khi cam dang OI o che do nut nhan.
+static esp_err_t result_handler(httpd_req_t *req) {
+  static char buf[768];   // du cho truong hop xau nhat (xem buildResultJson)
+  size_t n = buildResultJson(buf, sizeof(buf));
+  if (n == 0) n = (size_t)snprintf(buf, sizeof(buf), "{\"ok\":0}");
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_set_hdr(req, "Access-Control-Allow-Origin", "*");
+  httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+  return httpd_resp_send(req, buf, n);
 }
 
 static esp_err_t xclk_handler(httpd_req_t *req) {
@@ -1279,7 +1296,7 @@ static esp_err_t cfg_post_handler(httpd_req_t *req) {
 
 void startCameraServer() {
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  config.max_uri_handlers = 26;         // 13 (goc) + /setup + /api/cfg x2 + /api/scan + 5 captive
+  config.max_uri_handlers = 28;         // 13 (goc) + /setup + /api/cfg x2 + /api/scan + /result + 5 captive
   config.max_open_sockets = 4;          // 4 (thay vi 7): moi viewer them 1 fb_get tranh nhau
                                         // -> gioi han client de stream muot, LRU tu dong da client cu
   config.lru_purge_enable = true;       // tu dong dong ket noi cu khi day
@@ -1498,6 +1515,13 @@ void startCameraServer() {
     .handler = scan_handler,
     .user_ctx = NULL
   };
+  // Ket qua nhan dien gan nhat -> man LCD ESP32-C3 doc (xem buildResultJson)
+  httpd_uri_t result_uri = {
+    .uri = "/result",
+    .method = HTTP_GET,
+    .handler = result_handler,
+    .user_ctx = NULL
+  };
   // Captive portal: dang o AP -> dua dien thoai ve /setup; con lai tra 404
   httpd_uri_t captive_uri = {
     .uri = NULL,   // se gan tung endpoint trong vong lap dang ky
@@ -1539,6 +1563,7 @@ void startCameraServer() {
     httpd_register_uri_handler(camera_httpd, &cfg_get_uri);
     httpd_register_uri_handler(camera_httpd, &cfg_post_uri);
     httpd_register_uri_handler(camera_httpd, &scan_uri);
+    httpd_register_uri_handler(camera_httpd, &result_uri);
     // Cac endpoint captive portal -> dien thoai tu mo trang /setup khi vao AP
     for (size_t i = 0; i < sizeof(captive_uris) / sizeof(captive_uris[0]); i++) {
       captive_uri.uri = captive_uris[i];
