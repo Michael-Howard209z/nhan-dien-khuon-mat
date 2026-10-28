@@ -799,10 +799,27 @@ static bool showJpeg(size_t len) {
   drawOffX = (outW < LCD_W) ? (int16_t)((LCD_W - outW) / 2) : 0;
   drawOffY = (outH < LCD_H) ? (int16_t)((LCD_H - outH) / 2) : 0;
 
+  // LOG chuan doan: xem chinh xac kich thuc JPEG camera gui ve
+  Serial.printf("[JPEG] %dx%d -> scale=%d out=%dx%d off=%d,%d\n",
+                w, h, opt, outW, outH, drawOffX, drawOffY);
+
+  // Neu anh nho hon man hinh (320x240), to den vung con lai de khong con
+  // hien anh cu o phia sau -> khac biet "hien mot phan" vs "full man hinh".
+  if (outW < LCD_W || outH < LCD_H) {
+    tft.startWrite();
+    tft.fillRect(drawOffX, drawOffY, outW, outH, TFT_BLACK);
+    tft.endWrite();
+  }
+
   jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
+
+  // Toan bo bo decode duoc chap trong MOT transaction SPI de giam overhead
+  // mo/dong bus cho tung block MCU -> tang FPS.
+  tft.startWrite();
   uint32_t t0 = micros();
   int ok = jpeg.decode(0, 0, opt);
   lastDecodeMs = (micros() - t0) / 1000;
+  tft.endWrite();
   jpeg.close();
 
   if (!ok) {
@@ -1108,11 +1125,12 @@ void setup() {
   digitalWrite(TFT_BL, TFT_BACKLIGHT_ON);
 
   tft.init();
-  tft.setRotation(1);
-  tft.setSwapBytes(true);      // JPEGDEC xuat uint16 RGB565 chuan (little-endian)
-  tft.fillScreen(TFT_BLACK);
+  tft.setRotation(1);                      // landscape 320x240
+  tft.setSwapBytes(true);                  // JPEGDEC xuat uint16 RGB565 chuan (little-endian)
+  tft.fillScreen(TFT_BLACK);               // dam bao toan bo man hinh duoc xoa mau den
   tft.setTextSize(1);
-  Serial.printf("[TFT] %dx%d, rotation 1\n", tft.width(), tft.height());
+  Serial.printf("[TFT] init %dx%d -> rotation1 width=%d height=%d\n",
+                TFT_WIDTH, TFT_HEIGHT, tft.width(), tft.height());
 
   // Cam ung tren bus SPI rieng
   touchSPI.begin(TOUCH_SCLK_PIN, TOUCH_MISO_PIN, TOUCH_MOSI_PIN, TOUCH_CS_PIN);

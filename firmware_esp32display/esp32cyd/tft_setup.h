@@ -26,7 +26,10 @@
 
 #define USER_SETUP_LOADED
 
-// --- ILI9341 320x240 (portrait 240x320, xoay 1 -> 320x240 landscape) --------
+// --- ILI9341 320x240 (landscape) --------------------------------------------
+// CYD duoc chay o che do landscape 320x240 (rotation 1). TFT_eSPI tu hoan doi
+// chieu rong/cao sau setRotation(1), nen o day khai bao duoi dang portrait
+// de TFT_eSPI khoi tao driver dung, sau do setRotation(1) se danh cho landscape.
 #define ILI9341_DRIVER
 #define TFT_WIDTH  240
 #define TFT_HEIGHT 320
@@ -64,8 +67,10 @@
 #define LOAD_GFXFF
 #define SMOOTH_FONT
 
-// SPI clock: 40 MHz on dinh voi ILI9341 tren CYD.
-#define SPI_FREQUENCY       40000000
+// SPI clock: 40 MHz mac dinh, tang len 60 MHz de tang FPS hien thi.
+// ILI9341 tren CYD thong thuong hoat din 60-80 MHz. Neu man hinh xoi/nhieu
+// sau khi tang, giam lai 40000000.
+#define SPI_FREQUENCY       60000000
 #define SPI_READ_FREQUENCY  20000000
 #define SPI_TOUCH_FREQUENCY  2500000
 
