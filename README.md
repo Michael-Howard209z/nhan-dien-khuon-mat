@@ -123,6 +123,8 @@ Toàn bộ cấu hình nằm trong **`.env`** (copy từ `.env.example`):
 | `MATCH_MARGIN` | `0.10` | Độ lệch tối thiểu so với ứng viên thứ hai |
 | `DETECT_SCORE` | `0.62` | Ngưỡng chắc chắn của detector YuNet (0–1) |
 | `MIN_FACE_SIZE` | `44` | Bỏ qua mặt nhỏ hơn (px) — giảm nhận nhầm, tăng tốc |
+| `RECOGNIZE_MIN_FACE` | `64` | Cạnh mặt tối thiểu (px quy về khung rộng 640) mới **chốt tên** — chống nhận nhầm người lạ |
+| `RECOGNIZE_BLUR_MIN` | `15` | Độ nét Laplacian tối thiểu của vùng mặt mới **chốt tên** |
 | `TRACK_ENABLED` | `1` | Giữ ID người + ô vuông qua các khung mất dặt |
 | `TRACK_CONFIRM` | `3` | Số khung liên tiếp khớp mới **hiện tên** |
 | `TRACK_MAX_AGE` | `12` | Số khung liên tiếp không thấy mặt vẫn giữ ô vuông |
@@ -293,12 +295,36 @@ và giờ dùng **JetBrains Mono**.
 
 ### Chống nhận nhầm khi có nhiều người
 
-Ba lớp bảo vệ, đều **ưu tiên báo "Chưa nhận diện" còn hơn đoán sai**:
+Năm lớp bảo vệ, đều **ưu tiên báo "Chưa nhận diện" còn hơn đoán sai**:
 
 1. **Ngưỡng riêng từng người** — suy từ độ giống nhau giữa các mẫu của chính họ.
 2. **Biên so với ứng viên thứ hai** — gần bằng nhau (`MATCH_MARGIN`) thì không chốt.
 3. **Mỗi người một ô duy nhất trong khung** — 2 mặt cùng giống 1 người thì chỉ giữ
    kết quả tốt nhất.
+4. **Cổng kích thước mặt** (`RECOGNIZE_MIN_FACE`, mặc định 64 px quy về khung rộng
+   640) — mặt quá nhỏ thì vector SFace quá nhiễu, **không chốt tên** dù khoảng cách
+   có dưới ngưỡng.
+5. **Cổng độ nét** (`RECOGNIZE_BLUR_MIN`, mặc định 15) — mặt nhoè do rung/mất nét
+   cũng không chốt tên.
+
+Hai cổng 4–5 chỉ chặn **chốt tên/ghi điểm danh**, không chặn phát hiện khuôn mặt,
+nên preview vẫn vẽ ô đỏ "Chưa nhận diện" bình thường.
+
+**Khi nghi nhận nhầm**, đọc log console của server (chỉ in ở đợt quét 15s):
+
+```
+[scan sess_1234] KHOP id=7 Nguyen Van An dist=0.381 size=143 blur=210
+[scan sess_1234] BO id=7 ly_do=small dist=0.402 size=51 blur=180
+```
+
+- `dist` càng nhỏ càng giống (cùng người thường ≤ 0.34).
+- `ly_do=small|blur` = ứng viên bị cổng chất lượng loại (không ghi điểm danh).
+- Nếu thấy `dist` của người lạ nằm sát ngưỡng (0.36–0.42) trong nhiều khung →
+  **giảm** `MATCH_THRESHOLD` (vd 0.38) và/hoặc **tăng** `RECOGNIZE_MIN_FACE`.
+- Nếu học sinh thật bị bỏ qua với `ly_do=small` → giảm `RECOGNIZE_MIN_FACE`
+  (vd 48) hoặc cho học sinh đứng gần camera hơn.
+- Sửa nhanh trên portal `:5001` (tab cấu hình) hoặc trong `.env`, không cần
+  sửa code.
 
 ## 6. API debug (cổng `CAMERA_PORT` — mặc định `:5001`)
 
@@ -547,7 +573,7 @@ nhan-dien-khuon-mat-main/
 | Quên mật khẩu admin/developer | Đổi `ADMIN_PASSWORD` / `DEV_PASSWORD` trong `.env` rồi khởi động lại server (`.env` là nguồn chân lý) |
 | Không tải được model | Kiểm tra mạng, hoặc copy 2 file `.onnx` từ opencv_zoo vào `data/models/` |
 | Nhận diện sai / "Chưa nhận diện" | Thêm nhiều mẫu hơn (nhiều khoảng cách + góc), ánh sáng đều; **tăng** `MATCH_THRESHOLD` (0.42 → 0.50) nếu miss. Đo bằng `tune_threshold.py` |
-| Nhận nhầm người khác | **Giảm** `MATCH_THRESHOLD`, tăng `MATCH_MARGIN`, thêm mẫu chuẩn |
+| Nhận nhầm người khác | **Giảm** `MATCH_THRESHOLD`, tăng `MATCH_MARGIN`, tăng `RECOGNIZE_MIN_FACE` / `RECOGNIZE_BLUR_MIN`, làm lại mẫu mặt (mẫu cũ sát ngưỡng) |
 | Không thấy mặt nào | Quá xa/siêu nhỏ → giảm `MIN_FACE_SIZE`; nhiều vật giống mặt → tăng `DETECT_SCORE` |
 | Tên hiện chậm | Giảm `TRACK_CONFIRM` (3 → 2) |
 | Ô vuông nhảy / mất khi chớp sáng | Tăng `TRACK_MAX_AGE`, giảm `TRACK_SMOOTH`; hoặc `TRACK_BACKEND = csrt` |

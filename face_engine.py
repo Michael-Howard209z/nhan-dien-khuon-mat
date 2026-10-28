@@ -51,6 +51,12 @@ DEFAULTS = {
     "feature_every": 2,           # trích vector mới mỗi N khung cho mỗi track
     "blur_min": 12.0,             # biến Laplacian dưới ngưỡng này coi như mờ nét
     "sample_min": 48,             # mặt nhỏ hơn (px) thì không nhận làm mẫu
+    # --- Cổng chất lượng khi CHỐT TÊN (chống nhận nhầm người lạ) ------------
+    # Mặt càng nhỏ / càng mờ thì vector SFace càng nhiễu, dễ trùng ngẫu nhiên
+    # với mẫu của học sinh khác. Hai ngưỡng dưới đây chặn việc CHỐT TÊN
+    # (không chặn việc phát hiện hay đăng ký mẫu).
+    "recognize_min_face": 64,     # cạnh mặt tối thiểu, px quy về khung rộng 640
+    "recognize_blur_min": 15.0,   # độ nét Laplacian tối thiểu của vùng mặt
     "sample_dedup": 0.12,         # bỏ mẫu gần trùng mẫu đã có
     "augment_flip": True,         # lưu thêm bản lật ngang cho mỗi mẫu
     "track_enabled": True,
@@ -64,7 +70,7 @@ DEFAULTS = {
 }
 
 INT_KEYS = ("min_face_size", "detect_width", "detect_every", "feature_every",
-            "sample_min", "track_confirm", "track_max_age")
+            "sample_min", "track_confirm", "track_max_age", "recognize_min_face")
 STR_KEYS = ("track_backend",)
 
 CASCADE_NAME = "haarcascade_frontalface_default.xml"
@@ -909,6 +915,32 @@ class FaceEngine:
         crop = gray[max(0, y):y + h, max(0, x):x + w]
         return float(cv2.Laplacian(crop, cv2.CV_64F).var()) if crop.size >= 64 else 0.0
 
+    def face_quality(self, frame, box):
+        """(cạnh_px_quy_ve_640, độ_nét) của vùng mặt.
+
+        Cạnh được quy về khung rộng 640 để ngưỡng không phụ thuộc độ phân giải
+        nguồn (ESP32-CAM VGA, webcam 720p, điện thoại 2K...).
+        """
+        x, y, w, h = (int(v) for v in box)
+        frame_w = int(frame.shape[1]) if frame is not None else 640
+        side = min(max(0, w), max(0, h)) * (640.0 / max(1, frame_w))
+        if frame is None or w <= 0 or h <= 0:
+            return side, 0.0
+        crop = frame[max(0, y):y + h, max(0, x):x + w]
+        if crop.size < 64:
+            return side, 0.0
+        gray = crop if crop.ndim == 2 else cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        return side, float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
+    def _quality_reject(self, frame, box):
+        """Lý do KHÔNG đủ tin cậy để chốt tên: "small" | "blur" | None (đạt)."""
+        side, blur = self.face_quality(frame, box)
+        if side < float(self.cfg["recognize_min_face"]):
+            return "small"
+        if blur < float(self.cfg["recognize_blur_min"]):
+            return "blur"
+        return None
+
     # so khớp
     def _resolve_frame(self, per_track):
         """Chọn sao cho mỗi track trong khung: gần nhất thắng, mỗi người chỉ 1 ô.
@@ -1016,7 +1048,7 @@ class FaceEngine:
         if use_track:
             results = self._results_from_tracks(self.tracker.update(dets, embs, frame), need)
         else:
-            results = self._results_from_detections(dets, embs, gray)
+            results = self._results_from_detections(dets, embs, gray, frame)
 
         total = (time.perf_counter() - t_start) * 1000.0
         a = 0.15                                    # trung bình trượt cho số đo
@@ -1051,7 +1083,7 @@ class FaceEngine:
                 }))
         return results
 
-    def _results_from_detections(self, dets, embs, gray):
+    def _results_from_detections(self, dets, embs, gray, frame=None):
         per_det = []
         for i, d in enumerate(dets):
             ranked = self.matcher.rank_for(embs[i])
@@ -1067,11 +1099,26 @@ class FaceEngine:
                 sid2, dist2 = self.matcher.match_gray(frame_slice(gray, d.box))
                 if sid2 is not None and dist2 is not None and dist2 <= self.matcher.threshold:
                     sid, dist, match = sid2, dist2, True
+
+            side, blur = self.face_quality(frame, d.box)
+            extra = {"track_id": None, "confirming": False,
+                     "face_size": int(round(side)),
+                     "blur": round(blur, 1) if frame is not None else
+                             (round(self._blur_of(gray, d.box), 1) if gray is not None else None)}
+            # Chống nhận nhầm người lạ: mặt quá nhỏ/mờ thì KHÔNG chốt tên,
+            # dù khoảng cách cosin có dưới ngưỡng. Giữ lại candidate_id + dist
+            # để soi log, nhưng match=False nên không ghi điểm danh.
+            reject = self._quality_reject(frame, d.box)
+            if match and reject:
+                match = False
+                extra["reject"] = reject
+                extra["candidate_id"] = sid
+                extra["candidate_dist"] = round(float(dist), 3) if dist is not None else None
+
             sq = square_box(*d.box, pad=float(self.cfg["square_pad"]))
             results.append(self._pack(
-                d.box, sq, d.score, sid, dist, match,
-                extra={"track_id": None, "confirming": False,
-                       "blur": round(self._blur_of(gray, d.box), 1) if gray is not None else None}))
+                d.box, sq, d.score, sid if match else None, dist, match,
+                extra=extra))
         return results
 
     # vẽ

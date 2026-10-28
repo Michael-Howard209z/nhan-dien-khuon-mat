@@ -262,14 +262,9 @@ static int jsonIntField(const char *json, const char *key, int def) {
 }
 
 static bool jsonBoolField(const char *json, const char *key, bool def) {
-  if (!json || !key) return def;
-  char pat[40];
-  snprintf(pat, sizeof(pat), "\"%s\":", key);
-  const char *p = strstr(json, pat);
-  if (!p) return def;
-  p += strlen(pat);
-  while (*p == ' ') p++;
-  return (strncmp(p, "true", 4) == 0);
+  // JSON cua ESP32-CAM xuat so (0/1), khong phai true/false -> doc bang atoi.
+  int v = jsonIntField(json, key, def ? 1 : -1);
+  return v > 0;
 }
 
 // Ap dung JSON tu /result. Tra ve true neu doc duoc.
@@ -289,7 +284,8 @@ static bool applyResult(const char *json) {
   if (!strcmp(status, "ok") || !strcmp(status, "already")) {
     char raw[64] = "", cls[24] = "";
     jsonStrField(json, "full_name", raw, sizeof(raw));
-    jsonStrField(json, "class_name", cls, sizeof(cls));
+    if (!raw[0]) jsonStrField(json, "name", raw, sizeof(raw));
+    jsonStrField(json, "class", cls, sizeof(cls));
     vnToAscii(raw, showName, sizeof(showName));
     if (jsonBoolField(json, "already", false))
       snprintf(showInfo, sizeof(showInfo), "Da diem danh");

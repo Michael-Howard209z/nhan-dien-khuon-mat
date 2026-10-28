@@ -137,6 +137,10 @@ SETTINGS = {
     "detect_score": _env_number("DETECT_SCORE", DEFAULTS["detect_score"]),
     "min_face_size": _env_number("MIN_FACE_SIZE", DEFAULTS["min_face_size"], int),
     "match_margin": _env_number("MATCH_MARGIN", DEFAULTS["match_margin"]),
+    "recognize_min_face": _env_number("RECOGNIZE_MIN_FACE",
+                                      DEFAULTS["recognize_min_face"], int),
+    "recognize_blur_min": _env_number("RECOGNIZE_BLUR_MIN",
+                                      DEFAULTS["recognize_blur_min"]),
     "track_confirm": _env_number("TRACK_CONFIRM", DEFAULTS["track_confirm"], int),
     "track_max_age": _env_number("TRACK_MAX_AGE", DEFAULTS["track_max_age"], int),
     "track_smooth": _env_number("TRACK_SMOOTH", DEFAULTS["track_smooth"]),
@@ -169,6 +173,8 @@ engine.configure(
     detect_score=SETTINGS["detect_score"],
     min_face_size=SETTINGS["min_face_size"],
     match_margin=SETTINGS["match_margin"],
+    recognize_min_face=SETTINGS["recognize_min_face"],
+    recognize_blur_min=SETTINGS["recognize_blur_min"],
     track_confirm=SETTINGS["track_confirm"],
     track_max_age=SETTINGS["track_max_age"],
     track_enabled=SETTINGS["track_enabled"],
@@ -759,6 +765,8 @@ CONFIG_KEYS = (
     "detect_score",
     "min_face_size",
     "match_margin",
+    "recognize_min_face",
+    "recognize_blur_min",
     "track_confirm",
     "track_max_age",
     "track_smooth",
@@ -772,6 +780,8 @@ ENGINE_KEYS = (
     "detect_score",
     "min_face_size",
     "match_margin",
+    "recognize_min_face",
+    "recognize_blur_min",
     "track_confirm",
     "track_max_age",
     "track_smooth",
@@ -814,6 +824,8 @@ def set_config():
         "detect_score": float,
         "min_face_size": int,
         "match_margin": float,
+        "recognize_min_face": int,
+        "recognize_blur_min": float,
         "track_confirm": float,
         "track_max_age": int,
         "track_smooth": float,
@@ -1094,6 +1106,25 @@ def api_recognize():
     return jsonify(resp)
 
 
+def _log_scan_frame(results, session_id=None):
+    """In log chẩn đoán cho từng khung của đợt quét 15s.
+
+    Chỉ in khi CÓ mặt khớp hoặc CÓ ứng viên bị cổng chất lượng loại -> đúng
+    những trường hợp cần soi khi nghi nhận nhầm người lạ. Kèm dist (cosin,
+    càng nhỏ càng giống), kích thước mặt và độ nét.
+    """
+    for r in results:
+        tag = f"[scan {session_id or '-'}]"
+        if r.get("match"):
+            print(f"{tag} KHOP id={r.get('student_id')} {r.get('full_name')} "
+                  f"dist={r.get('confidence')} size={r.get('face_size')} "
+                  f"blur={r.get('blur')}")
+        elif r.get("candidate_id"):
+            print(f"{tag} BO id={r.get('candidate_id')} ly_do={r.get('reject')} "
+                  f"dist={r.get('candidate_dist')} size={r.get('face_size')} "
+                  f"blur={r.get('blur')}")
+
+
 # esp32 frame
 @cam_app.post("/api/esp32/frame")
 def api_esp32_frame():
@@ -1164,6 +1195,8 @@ def api_esp32_frame():
 
     # Nhận diện đồng bộ cho đúng ảnh vừa nhận; capture=1 -> ghi điểm danh 1 lần trong phiên 15s.
     results, _annotated = engine.process(img, draw=False, track=False)
+    if want_capture:
+        _log_scan_frame(results, session_id)
     esp32_state["last_count"] = len(results)
     resp = {"ok": True, "results": results, "count": len(results), "cached": False}
     if want_capture:

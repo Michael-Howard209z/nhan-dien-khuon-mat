@@ -266,6 +266,29 @@ bx = best.box[0] + best.box[2] / 2
 print(f"   mặt được chọn: box={best.box}, tâm x={bx:.0f} (A ở giữa ~575)")
 check("chọn người ở giữa khung (A) chứ không phải người ở góc", abs(bx - 575) < 240, bx)
 
+print("\n=== 10b. Cổng chất lượng chống nhận nhầm người lạ ===")
+flat = np.full((480, 640, 3), 128, np.uint8)
+check("mặt nhỏ hơn RECOGNIZE_MIN_FACE -> ly_do=small",
+      eng._quality_reject(flat, (10, 10, 40, 40)) == "small",
+      eng._quality_reject(flat, (10, 10, 40, 40)))
+check("mặt đủ lớn nhưng phẳng (mờ) -> ly_do=blur",
+      eng._quality_reject(flat, (100, 100, 120, 120)) == "blur",
+      eng._quality_reject(flat, (100, 100, 120, 120)))
+_res0, _ = eng.process(frames[0], draw=False, track=False)
+_box0 = max((r["box"] for r in _res0 if r["match"]), key=lambda b: b[2] * b[3], default=None)
+if _box0:
+    side, blur = eng.face_quality(frames[0], _box0)
+    print(f"   mặt thật: size={side:.0f}px blur={blur:.0f} reject={eng._quality_reject(frames[0], _box0)}")
+    check("mặt thật đủ lớn và nét -> không bị chặn",
+          eng._quality_reject(frames[0], _box0) is None, (side, blur))
+eng.configure(recognize_min_face=4096)   # buộc mọi mặt bị cổng kích thước loại
+res_q, _ = eng.process(frames[0], draw=False, track=False)
+check("cổng chất lượng chặn -> match=False (không điểm danh)",
+      all(not r["match"] for r in res_q), res_q)
+check("cổng chất lượng chặn -> giữ candidate_id để soi log",
+      any(r.get("candidate_id") for r in res_q), res_q)
+eng.configure(recognize_min_face=64)
+
 print("\n=== 11. Cấu hình runtime ===")
 changed = eng.configure(match_threshold=0.30, match_margin=0.2, track_confirm=2)
 print("   đổi:", changed)
