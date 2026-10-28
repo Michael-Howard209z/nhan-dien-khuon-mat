@@ -6,6 +6,8 @@ __pycache__/
 venv/
 data/faces/
 data/faces_backup_remote_60
+data/_test_db
+data/_test_out
 students.db
 
 
@@ -27,3 +29,5 @@ build_esp32/
 build/
 *.tmp
 *.doc
+build/
+build_cyd/

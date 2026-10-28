@@ -813,13 +813,9 @@ static bool showJpeg(size_t len) {
 
   jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
 
-  // Toan bo bo decode duoc chap trong MOT transaction SPI de giam overhead
-  // mo/dong bus cho tung block MCU -> tang FPS.
-  tft.startWrite();
   uint32_t t0 = micros();
   int ok = jpeg.decode(0, 0, opt);
   lastDecodeMs = (micros() - t0) / 1000;
-  tft.endWrite();
   jpeg.close();
 
   if (!ok) {
@@ -1125,7 +1121,7 @@ void setup() {
   digitalWrite(TFT_BL, TFT_BACKLIGHT_ON);
 
   tft.init();
-  tft.setRotation(1);                      // landscape 320x240
+  tft.setRotation(0);                      // Native landscape 320x240 — KHONG XOAY de tranh tearing
   tft.setSwapBytes(true);                  // JPEGDEC xuat uint16 RGB565 chuan (little-endian)
   tft.fillScreen(TFT_BLACK);               // dam bao toan bo man hinh duoc xoa mau den
   tft.setTextSize(1);
