@@ -4,7 +4,7 @@
 #define USER_SETUP_LOADED
 
 // Native landscape 320x240 — KHONG xoay (rotation 0) de tranh tearing
-#define ILI9341_DRIVER
+#define ST7735_DRIVER
 #define TFT_WIDTH  320
 #define TFT_HEIGHT 240
 
