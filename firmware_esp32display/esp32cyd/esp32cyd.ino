@@ -1121,7 +1121,7 @@ void setup() {
   digitalWrite(TFT_BL, TFT_BACKLIGHT_ON);
 
   tft.init();
-  tft.setRotation(0);                      // Native landscape 320x240 — KHONG XOAY de tranh tearing
+  tft.setRotation(1);                      // landscape 320x240 từ portrait gốc
   tft.setSwapBytes(true);                  // JPEGDEC xuat uint16 RGB565 chuan (little-endian)
   tft.fillScreen(TFT_BLACK);               // dam bao toan bo man hinh duoc xoa mau den
   tft.setTextSize(1);

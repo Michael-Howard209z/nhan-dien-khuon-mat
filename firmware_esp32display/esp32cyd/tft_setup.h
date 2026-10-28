@@ -4,9 +4,9 @@
 #define USER_SETUP_LOADED
 
 // Native landscape 320x240 — KHONG xoay (rotation 0) de tranh tearing
-#define ST7735_DRIVER
-#define TFT_WIDTH  320
-#define TFT_HEIGHT 240
+#define ILI9341_DRIVER
+#define TFT_WIDTH  240
+#define TFT_HEIGHT 320
 
 #define CYD_DISPLAY_ON_VSPI 0
 
@@ -37,7 +37,7 @@
 #define LOAD_GFXFF
 #define SMOOTH_FONT
 
-#define SPI_FREQUENCY       20000000
+#define SPI_FREQUENCY       60000000
 #define SPI_READ_FREQUENCY  10000000
 #define SPI_TOUCH_FREQUENCY  2500000
 
