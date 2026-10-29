@@ -46,6 +46,8 @@
 #include "driver/gpio.h"       // gpio_get_level: do truc tiep VSYNC/HREF/PCLK tai /camdiag
 #include "app_config.h"         // cau hinh persistent (NVS): WiFi, IP tinh, server, huong cam
 #include <WiFiUdp.h>            // phat hien server qua UDP broadcast (khong can IP server)
+#include <freertos/FreeRTOS.h>  // mutex chia se khung hinh cho MJPEG :81
+#include <freertos/semphr.h>
 // Select camera model in board_config.h
 
 #include "board_config.h"
@@ -83,7 +85,7 @@ static DNSServer dnsServer;
 
 #define BUTTON_ENABLE     1       // 1 = che do nut nhan (cam OFF khi nghi, nhan nut = truyen anh 15s)
                                   // 0 = quay lai che do cu (PULL/PUSH lien tuc, cam luon bat)
-#define FW_VERSION "2026-10-27-lcd1"  // in ra Serial luc boot de biet board dang chay ban nao
+#define FW_VERSION "2026-10-29-scan2"  // in ra Serial luc boot de biet board dang chay ban nao
 // --- Tu tim IP server qua UDP broadcast (xem them o phan DISC duoi day) ---
 //  1 = MOI (khuyen dung): server phat "FACESYNC|SERVER|http://ip:5001" ra mang,
 //      ESP32 tu doi URL khi server doi IP. Khong anh huong gi den camera.
@@ -200,11 +202,8 @@ static const char *discModeName() {
 #endif
 }
 
-static void discSend(const char *payload) {
+static void discSendRaw(const char *payload) {
   if (!g_discOn || WiFi.status() != WL_CONNECTED) return;
-  uint32_t now = millis();
-  if (g_discLastSend && (now - g_discLastSend) < DISC_MIN_GAP_MS) return;  // han che do nhieu
-  g_discLastSend = now;
 
   // 1) Broadcast toan mang (255.255.255.255)
   if (g_discUdp.beginPacket(IPAddress(255, 255, 255, 255), DISC_PORT)) {
@@ -223,6 +222,31 @@ static void discSend(const char *payload) {
       g_discUdp.endPacket();
     }
   }
+}
+
+static void discSend(const char *payload) {
+  if (!g_discOn || WiFi.status() != WL_CONNECTED) return;
+  uint32_t now = millis();
+  if (g_discLastSend && (now - g_discLastSend) < DISC_MIN_GAP_MS) return;  // han che do nhieu
+  g_discLastSend = now;
+  discSendRaw(payload);
+}
+
+// Bao cho man hinh CYD biet dot quet bat dau/ket thuc de no MO/DONG stream
+// MJPEG :81. Gui 3 ban lien tiep (~12ms) vi UDP co the mat goi; luc dang quet
+// con gui lap lai moi ~1.5s (xem doButtonCapture) de CYD biet camera van quet.
+// KHONG bi gioi han DISC_MIN_GAP_MS (thong bao su kien, khong phai discovery).
+static void discNotifyScan(bool active) {
+  if (!g_discOn || WiFi.status() != WL_CONNECTED) return;
+  char msg[80];
+  snprintf(msg, sizeof(msg), DISC_MAGIC "|SCAN|%d|%s", active ? 1 : 0,
+           WiFi.localIP().toString().c_str());
+  for (int i = 0; i < 3; i++) {
+    discSendRaw(msg);
+    delay(12);
+  }
+  Serial.printf("[DISC] Thong bao %s cho man CYD\n",
+                active ? "BAT DAU QUET" : "KET THUC QUET");
 }
 
 // Gui khong ton han che 5s (dung rieng cho luc boot).
@@ -434,6 +458,7 @@ static void discPoll() {}
 static void discInfoPoll() {}
 static void discBegin() {}
 static bool discBootBurst() { return false; }
+static void discNotifyScan(bool) {}   // khong bao duoc CYD -> CYD dung /result
 #endif  // DISCOVERY_ENABLE
 
 //Trang thai push va heartbeat 
@@ -444,6 +469,20 @@ const char *g_push_url = PUSH_URL;   // se tro sang cfg.push_url sau cfg_load() 
 volatile bool g_server_online = false; // true = server Python dang phan hoi heartbeat (online)
 volatile bool g_is_scanning = false;   // true = dang trong dot truyen anh 15 giay
 volatile uint32_t g_last_heartbeat_ms = 0;   // khong static: ham discovery doc duoc
+
+// ---------------------------------------------------------------------------
+//  CHIA SE KHUNG HINH CHO MJPEG :81 TRONG LUC QUET
+// ---------------------------------------------------------------------------
+//  Khi bam nut, CHI vong lap doButtonCapture() goi esp_camera_fb_get() (fb_count
+//  = 1). Neu stream :81 cung goi fb_get() thi hai ben tranh nhau tung khung ->
+//  dot quet co the bi NULL frame (nhan dien that bai).
+//  Vi vay trong luc quet, stream :81 KHONG tu chup ma doc ban copy moi nhat
+//  tu g_share_buf. Khi KHONG quet (xem web binh thuong) stream van tu chup.
+uint8_t *g_share_buf = NULL;          // buffer JPEG moi nhat (PSRAM)
+size_t   g_share_cap = 0;
+volatile size_t   g_share_len = 0;
+volatile uint32_t g_share_seq = 0;    // tang 1 moi khung moi
+SemaphoreHandle_t g_share_mux = NULL;
 
 // ---------------------------------------------------------------------------
 //  KET QUA NHAN DIEN MOI NHAT -> cho MAN LCD (ESP32-C3 + PCF8574 I2C) doc
@@ -643,6 +682,45 @@ static bool push_ensure_buf() {
     return false;
   }
   return true;
+}
+
+// --- Chia se khung hinh cho stream :81 (chi dung trong dot quet) -------------
+// Cap buffer 1 lan. Uu tien PSRAM vi VGA q12 ~30KB/frame.
+static bool shareEnsureBuf() {
+  if (!g_share_buf) {
+    g_share_buf = (uint8_t *)heap_caps_malloc(PUSH_JPEG_MAX,
+                                              MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!g_share_buf) g_share_buf = (uint8_t *)malloc(PUSH_JPEG_MAX);
+    if (g_share_buf) g_share_cap = PUSH_JPEG_MAX;
+  }
+  if (!g_share_mux) {
+    g_share_mux = xSemaphoreCreateMutex();
+  }
+  if (!g_share_buf || !g_share_mux) {
+    Serial.println("[SHARE] khong cap duoc buffer/mutex -> stream :81 se tu chup");
+    return false;
+  }
+  return true;
+}
+
+static void shareReset() {
+  if (!shareEnsureBuf()) return;
+  if (xSemaphoreTake(g_share_mux, pdMS_TO_TICKS(100)) == pdTRUE) {
+    g_share_len = 0;
+    xSemaphoreGive(g_share_mux);
+  }
+}
+
+// Copy khung vua chup vao buffer chia se. Bo qua neu task stream dang doc
+// (giu mutex qua lau) -> khong lam cham dot quet.
+static void sharePublish(const uint8_t *buf, size_t len) {
+  if (!shareEnsureBuf()) return;
+  if (len > g_share_cap) len = g_share_cap;
+  if (xSemaphoreTake(g_share_mux, pdMS_TO_TICKS(200)) != pdTRUE) return;
+  memcpy(g_share_buf, buf, len);
+  g_share_len = len;
+  g_share_seq++;
+  xSemaphoreGive(g_share_mux);
 }
 
 static Client *push_client() {
@@ -1522,6 +1600,8 @@ static void doButtonCapture() {
 
   g_is_scanning = true;
   resPublish(1, 0, 0, NULL, NULL, 0, NULL, -1, -1);     // LCD: dang quet
+  shareReset();                                        // khong gui lai khung cu
+  discNotifyScan(true);                                // CYD: mo stream :81 NGAY
 
   // Tao ma phien session_id duy nhat cho dot 15 giay nay
   char session_id[40];
@@ -1574,6 +1654,7 @@ static void doButtonCapture() {
     camPowerReport();   // in nguyen nhan reset truoc do (co the la SAP NGUON)
     btnLed(false);
     g_is_scanning = false;
+    discNotifyScan(false);   // CYD dong stream
     resPublish(5, 0, 0, NULL, NULL, 0, NULL, -1, -1);   // LCD: camera khong ra khung
     btnBlink(4, 120, 120);
     cam_sleep_request();
@@ -1581,6 +1662,7 @@ static void doButtonCapture() {
   }
 
   uint32_t t_end = millis() + (uint32_t)BUTTON_SCAN_SECONDS * 1000UL;
+  uint32_t nextNotify = millis() + 1200;   // lap lai thong bao quet cho CYD
   int frames = 0, fails = 0, last_fail = 0;  // last_fail: 4 = loi LAY KHUNG, 5 = loi GUI
   int best_outcome = 0;   // 0 = chua khop, 1 = diem danh OK, 2 = da diem danh
   char final_name[64];
@@ -1588,6 +1670,12 @@ static void doButtonCapture() {
 
   // Truyen hinh anh LIEN TUC trong suot 15 giay (KHONG break som khi khop)
   while ((int32_t)(t_end - millis()) > 0) {
+    // Lap lai thong bao de CYD nao boot tre/mat goi UDP van mo duoc stream.
+    if ((int32_t)(millis() - nextNotify) >= 0) {
+      nextNotify = millis() + 1500;
+      discNotifyScan(true);
+    }
+
     uint32_t t_get = millis();
     camera_fb_t *fb = esp_camera_fb_get();
     uint32_t dt_get = millis() - t_get;
@@ -1606,6 +1694,10 @@ static void doButtonCapture() {
       memcpy(push_buf, fb->buf, fb->len);
       esp_camera_fb_return(fb);   // tra fb ngay
       frames++;
+
+      // Chia se khung nay cho MJPEG :81 (CYD dang xem). Stream chi doc ban
+      // copy -> khong goi fb_get, khong tranh frame voi dot quet.
+      sharePublish(push_buf, len);
 
       if (!push_connect(c)) {
         Serial.printf("[BTN] loi mang: khong ket noi duoc %s:%u\n",
@@ -1689,6 +1781,7 @@ static void doButtonCapture() {
 
   btnLed(false);   // tat flash
   g_is_scanning = false;
+  discNotifyScan(false);   // CYD: dong stream :81 -> ha nhiet camera
 
   // Ngay lap tuc gui 1 heartbeat (phase=idle) de server biet dot 15s da ket thuc
   // -> hien thi lai che do CHO thay vi cho het cua so 16s sau khung cuoi.

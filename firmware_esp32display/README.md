@@ -38,15 +38,19 @@ Tom tat:
 
 ## B.1 Chuc nang
 
-1. Hien **anh live** tu ESP32-CAM (`http://<cam>:81/stream`, MJPEG)
-   de hoc sinh thay minh va can mat vao khung hinh.
-2. Doc `GET http://<cam>:80/result` moi 0.7s, hien banner:
+1. Hien **anh live chi trong 15 giay quet** (sau khi bam nut tren ESP32-CAM)
+   tu `http://<cam>:81/stream` (MJPEG) de hoc sinh thay minh va can mat.
+   **Idle (khong bam nut): khong mo stream** -> ESP32-CAM khong chup lien tuc,
+   may mat, tiet kiem dien. Man hinh CYD hien trang "SAN SANG DIEM DANH".
+   Kết nối WiFi + UDP 4321 + polling /result duoc giu de bam nut co anh ngay,
+   khong delay.
+2. Doc `GET http://<cam>:80/result` moi 0.5s, hien banner:
    `DIEM DANH OK` / `DA DIEM DANH` / `KHONG NHAN RA` / `LOI CAMERA` / `LOI MANG`.
-3. **Tu dong tam dung stream khi ESP32-CAM dang quet 15s** (`scanning=1`).
-   Ly do: camera cau hinh `fb_count=1`, mot client stream lien tuc co the
-   lay het frame khien dot quet khong chup duoc anh. Khi tam dung, man hinh
-   giu khung hinh cuoi + hien `DANG QUET` + thanh tien trinh 15s.
-   Sau khi quet xong 1.5s, stream tu bat lai.
+3. ESP32-CAM bao bat dau/ket thuc qua UDP `FACESYNC|SCAN|1|<ip>` /
+   `FACESYNC|SCAN|0|<ip>` (cong 4321) -> CYD mo/dong stream **ngay**,
+   khong cho 0.5s poll. Neu UDP bi chan, CYD dung cot `scanning` trong
+   `/result` du phong. Sau quet xong CYD dong stream de ha nhiet, nhung van
+   giu ket noi de lan bam sau co anh luon.
 4. Nut cam ung goc tren phai: `DUNG` / `XEM` (tat/bat xem truc tiep).
 5. Tu tim IP camera qua UDP broadcast 4321 (`FACESYNC|CAM?`).
 
@@ -135,7 +139,7 @@ Lenh Serial:
 | `/find` | Tim camera qua UDP 4321 |
 | `/live on` / `/live off` | Bat/tat xem truc tiep |
 | `/test` | Chay lai self-test man hinh (4 mau + vien + 4 goc) |
-| `/rot 0..3` | Doi rotation ngay (1 = landscape 320x240) |
+| `/rot 0..7` | Doi rotation ngay (mac dinh 2 = landscape 320x240; tu thu 0..3 neu khong ra landscape) |
 | `/touch` | Bat/tat in toa do cam ung (hieu chuan) |
 | `/stats` | fps, kich thuoc frame, thoi gian decode, heap |
 | `/reboot` | Khoi dong lai |
@@ -182,7 +186,7 @@ Cach chon nhanh: cham goc **tren-trai**. Toa do in ra phai gan `(0,0)`.
 | `KET NOI` mai | Camera dang bi client khac chiem (mo nhieu tab `/stream`). Dong bot tab. |
 | Cham nut khong an | Chay `/touch` de kiem tra toa do; hieu chuan lai B.6. |
 | Treo khi quet | Xem `scanning` co ve 1 khong (log `[CAM] Bat dau quet`). Fail-safe tu bo sau 20s. |
-| Chi hien **2/3 man hinh** / mat phan ben phai hoac duoi | Panel la ILI9341 **240x320 portrait**; khung hinh ngang 320x240 chi dat duoc bang `tft.setRotation(1)` voi `TFT_WIDTH 240` / `TFT_HEIGHT 320` trong `tft_setup.h`. **Khong** doi thanh `TFT_WIDTH 320` / `TFT_HEIGHT 240` (sai cua so dia chi -> chi ve 2/3). Go `/test`: vien trang phai kin 4 canh va du 4 nhan goc `0,0` / `319,0` / `0,239` / `319,239`. Neu van portrait: go `/rot 3` hoac `/rot 1` de thu, log se in `rotation N -> WxH`. |
+| Chi hien **2/3 man hinh** / mat phan ben phai hoac duoi | Panel la ILI9341 **240x320 portrait**; khung hinh ngang 320x240 chi dat duoc bang `tft.setRotation(2)` (mac dinh) voi `TFT_WIDTH 240` / `TFT_HEIGHT 320` trong `tft_setup.h`. **Khong** doi thanh `TFT_WIDTH 320` / `TFT_HEIGHT 240` (sai cua so dia chi -> chi ve 2/3). Go `/test`: vien trang phai kin 4 canh va du 4 nhan goc `0,0` / `319,0` / `0,239` / `319,239`. Neu van portrait: go `/rot 3` hoac `/rot 1` de thu, log se in `rotation N -> WxH`. |
 | Anh co soc ngang nhung UI/chu sach | Chay `/test`: neu self-test sach thi panel + driver OK, soc nam trong anh JPEG tu camera (moi truong/anh sang/bien do). Thu tang `SPI_FREQUENCY` len 27-40MHz neu `/stats` bao decode cham. |
 | Boot cham ~2,5 giay | Self-test luc boot (`CYD_SELFTEST 1`). Doi `CYD_SELFTEST` thanh `0` trong `esp32cyd.ino` khi da xac nhan panel tot. |
 
@@ -194,21 +198,23 @@ Cach chon nhanh: cham goc **tren-trai**. Toa do in ra phai gan `(0,0)`.
 - `tft.setSwapBytes(true)` vi JPEGDEC xuat RGB565 dang uint16 chuan
   (little-endian), con ILI9341 nhan byte cao truoc.
 - **Huong man hinh:** CYD 2.8" dung panel ILI9341 **240x320 portrait**.
-  Khung ngang 320x240 = `tft.init()` (native 240x320) + `tft.setRotation(1)`.
-  `LCD_W 320` / `LCD_H 240` trong sketch la kich thuoc SAU xoay, khong phai
-  `TFT_WIDTH`/`TFT_HEIGHT`. Doi 2 macro driver thanh 320/240 se lam lech cua so
-  dia chi -> chi hien 2/3 man hinh hoac soc.
+  Khung ngang 320x240 = `tft.init()` (native 240x320) + `tft.setRotation(2)`
+  (mac dinh, yeu cau moi nhat). `LCD_W 320` / `LCD_H 240` trong sketch la
+  kich thuoc SAU xoay, khong phai `TFT_WIDTH`/`TFT_HEIGHT`. Doi 2 macro
+  driver thanh 320/240 se lam lech cua so dia chi -> chi hien 2/3 man hinh
+  hoac soc.
 - **SPI clock 27 MHz:** ILI9341 tren CYD chi nen chay <= 40 MHz. Ban truoc de
   **60 MHz** (commit f5c7c52 ghi nham "20MHz") gay soc/tearing + chi ve mot phan
   man hinh. Muon nhanh hon thu 40 MHz; neu con soc ha 20 MHz.
-- **Kiem tra huong luc boot:** `applyRotation(1)` roi kiem tra
-  `tft.width() > tft.height()`; neu khong, tu thu rotation 0..3 va log
-  `[TFT] CANH BAO...`. Lenh `/rot N` doi rotation ngay khong can nap lai.
+- **Kiem tra huong luc boot:** `applyRotation(2)` (mac dinh) roi kiem tra
+  `tft.width() > tft.height()`; neu khong, tu thu rotation 0..3 va chon cai
+  landscape dau tien, log `[TFT] CANH BAO...`. Lenh `/rot N` doi rotation
+  ngay khong can nap lai.
 - **Self-test** (`CYD_SELFTEST 1`, ham `drawSelfTest()`): 4 mau dac full man
   hinh -> vien trang 2px kin 4 canh -> nhan toa do 4 goc -> dong `SELFTEST
   320x240`. Muc dich: tach loi panel/driver khoi loi anh JPEG. Chay lai bang
   lenh `/test`. Log boot dung phai la:
-  `[TFT] driver ILI9341, native 240x320 portrait -> rotation1 320x240`.
+  `[TFT] driver ILI9341, native 240x320 portrait -> rotation2 320x240 (UI 320x240)`.
 - **Chong ghep frame hong:** `readFrame()` bo phan JPEG cu va bat dau lai khi
   gap SOI moi truoc khi thay EOI (frame bi cat giua chung do rot mang/camera
   treo) — tranh 2 nua frame dinh nhau gay vach ngang.

@@ -486,6 +486,14 @@ proxy `/api/esp32/live`.
 | **PUSH liên tục** | `BUTTON_ENABLE = 0`, `PUSH_ENABLE = 1`, `PUSH_MODE_MJPEG = 0` | xem `GET /api/esp32/status` |
 | **PULL** (chỉ debug) | `PUSH_ENABLE = 0` | `.env`: `STREAM_URL = http://<ip-esp32>:81/stream` |
 
+### Hành vi màn hình CYD (ESP32-2432S028R) — giảm nhiệt / điện
+
+- **Mặc định rotation = 2** (landscape 320×240). Lệnh Serial `/rot 0..7` đổi ngay; tự thử 0..3 nếu rotation mặc định không ra landscape.
+- **Idle (không ai bấm nút):** CYD **KHÔNG mở stream MJPEG `:81`** → ESP32-CAM không chụp liên tục → máy mát, tiết kiệm điện. Màn hình CYD hiển thị trang "SẴN SÀNG ĐIỂM DANH" (viết "Bấm nút trên ESP32-CAM"). Kết nối WiFi + UDP 4321 + polling `/result` vẫn được giữ để phản hồi ngay.
+- **Bấm nút trên ESP32-CAM:** CAM gửi UDP `FACESYNC|SCAN|1|<ip>` ngay lập tức → CYD **mở stream `:81` trong giây lát** (không có delay chờ poll). Ảnh truyền suốt 15 giây quét; kết quả nhận diện hiện trên CYD (banner) và LCD1602.
+- **Hết 15 giây:** CAM gửi UDP `FACESYNC|SCAN|0|<ip>` → CYD **đóng stream** để hạ nhiệt. Giữ kết nối (WiFi/UDP/HTTP) để lần bấm nút sau vẫn có ảnh ngay, không delay.
+- Nếu UDP bị chặn tường lửa, CYD dự phòng qua trường `scanning` trong `GET /result` (poll mỗi 0,5s).
+
 - `<ip-esp32>` xem trên Serial Monitor (baud 115200). Web `:80`, stream `:81`.
 - Nạp firmware: board `AI Thinker ESP32-CAM` (PSRAM), partition `custom`
   (`partitions.csv`). **Chi tiết cấu hình + nháy LED: xem

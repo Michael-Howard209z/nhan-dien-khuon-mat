@@ -14,6 +14,7 @@
 #include "esp_http_server.h"
 #include "esp_timer.h"
 #include "esp_system.h"      // esp_restart() khi luu cau hinh mang xong
+#include "esp_heap_caps.h"   // heap_caps_malloc: buffer chia se khung hinh (PSRAM)
 #include "esp_camera.h"
 #include "img_converters.h"
 #include "fb_gfx.h"
@@ -27,6 +28,9 @@
 #include <WiFi.h>
 #include <lwip/sockets.h>
 #include <lwip/tcp.h>
+#include <sys/time.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 #if defined(ARDUINO_ARCH_ESP32) && defined(CONFIG_ARDUHAL_ESP_LOG)
 #include "esp32-hal-log.h"
@@ -86,6 +90,16 @@ extern volatile bool g_stream_active; // true = stream :81 dang chay -> camSleep
 extern int g_button_pin;             // GPIO nut nhan (-1 = tat che do nut nhan)
 bool camWake();                      // bat camera (init lai neu can) -> false = loi
 void camSleep();                     // giu nguyen camera (no-op, xem .ino)
+
+// Khung hinh moi nhat cua dot quet nut (dinh nghia trong .ino).
+// Khi g_is_scanning = true, stream :81 doc ban copy nay thay vi goi
+// esp_camera_fb_get() -> khong tranh frame voi nhan dien khuon mat.
+extern volatile bool g_is_scanning;
+extern uint8_t *g_share_buf;
+extern size_t g_share_cap;
+extern volatile size_t g_share_len;
+extern volatile uint32_t g_share_seq;
+extern SemaphoreHandle_t g_share_mux;
 
 // Ket qua nhan dien gan nhat (dinh nghia trong .ino) — cho man LCD ESP32-C3.
 // Man LCD chi DOC ket qua tu day: GET /result -> JSON.
@@ -279,6 +293,8 @@ static esp_err_t stream_handler(httpd_req_t *req) {
   esp_err_t res = ESP_OK;
   size_t _jpg_buf_len = 0;
   uint8_t *_jpg_buf = NULL;
+  uint8_t *tx_buf = NULL;       // copy khung chia se truoc khi send (khong giu mutex)
+  uint32_t last_share_seq = 0;
   char part_buf[192];
 
   static int64_t last_frame = 0;
@@ -303,6 +319,48 @@ static esp_err_t stream_handler(httpd_req_t *req) {
 #endif
 
   while (true) {
+    // ---- Trong dot quet nut: gui khung do doButtonCapture() vua chup ----
+    // KHONG goi esp_camera_fb_get() o day (fb_count=1) de dot quet khong bi
+    // mat frame. Khi khong quet (xem web binh thuong) van chup nhu cu.
+    if (g_is_scanning && g_share_buf && g_share_mux && g_share_cap) {
+      if (g_share_len == 0 || g_share_seq == last_share_seq) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        continue;
+      }
+      if (!tx_buf) {
+        tx_buf = (uint8_t *)heap_caps_malloc(g_share_cap,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (!tx_buf) tx_buf = (uint8_t *)malloc(g_share_cap);
+      }
+      if (!tx_buf) {
+        log_e("Share tx buffer alloc failed -> fallback fb_get");
+      } else if (xSemaphoreTake(g_share_mux, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        size_t len = g_share_len;
+        if (len > g_share_cap) len = g_share_cap;
+        memcpy(tx_buf, g_share_buf, len);
+        uint32_t seq = g_share_seq;
+        xSemaphoreGive(g_share_mux);
+
+        struct timeval tv;
+        gettimeofday(&tv, NULL);
+        size_t hlen = snprintf(part_buf, sizeof(part_buf), _STREAM_PART,
+                               (unsigned)len, (int)tv.tv_sec, (int)tv.tv_usec);
+        res = httpd_resp_send_chunk(req, part_buf, hlen);
+        if (res == ESP_OK) {
+          res = httpd_resp_send_chunk(req, (const char *)tx_buf, len);
+        }
+        if (res != ESP_OK) {
+          log_e("Send shared frame failed");
+          break;
+        }
+        last_share_seq = seq;
+        continue;
+      } else {
+        vTaskDelay(pdMS_TO_TICKS(5));
+        continue;
+      }
+    }
+
     fb = esp_camera_fb_get();
     if (!fb) {
       log_e("Camera capture failed");
@@ -358,6 +416,11 @@ static esp_err_t stream_handler(httpd_req_t *req) {
       "MJPG: %uB %ums (%.1ffps), AVG: %ums (%.1ffps)", (uint32_t)(_jpg_buf_len), (uint32_t)frame_time, 1000.0 / (uint32_t)frame_time, avg_frame_time,
       1000.0 / avg_frame_time
     );
+  }
+
+  if (tx_buf) {
+    free(tx_buf);
+    tx_buf = NULL;
   }
 
   g_stream_active = false;   // loop stream da ket thuc -> camSleep() phep chay lai
