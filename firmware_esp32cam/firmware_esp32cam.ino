@@ -331,11 +331,18 @@ static void discOnServerUrl(const char *url) {
 
   // Da nghe duoc mot URL server hop le (du URL nay trung URL dang dung).
   // Co bien nay de log boot KHONG bao nham "chua nghe thay server nao".
+  // Da nghe duoc mot URL server hop le (du URL nay trung URL dang dung).
+  // Co bien nay de log boot KHONG bao nham "chua nghe thay server nao".
+  bool justHeard = !g_discHeard;
   g_discHeard = true;
 
   if (strcmp(url, cfg.push_url) == 0) {
-    Serial.printf("[DISC] Nghe server: %s (dang dung dung URL nay)\n", url);
-    return;                                            // khong doi gi
+    // URL da chinh xac -> khong doi gi. Chi in 1 lan khi lan dau nghe
+    // duoc server (vd luc boot), sau do im lan de tranh spam moi 5s.
+    if (justHeard) {
+      Serial.printf("[DISC] Nghe server: %s (dang dung dung URL nay)\n", url);
+    }
+    return;
   }
 
   // Chi doi khi dang mat ket noi (khong lam gian doan phien dang chay tot).
