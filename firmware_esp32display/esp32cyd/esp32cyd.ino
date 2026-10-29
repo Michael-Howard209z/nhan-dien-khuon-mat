@@ -1,59 +1,55 @@
 /* ===========================================================================
  *  ESP32-2432S028R (CYD) - MAN HINH CAN MAT + KET QUA DIEM DANH
+ *  Firmware: 2026-10-29-cyd5 (viet lai tu dau, sach will)
  * ===========================================================================
  *
  *  Vai tro:
- *    1. CHI hien thi anh LIVE trong dung 15 giay sau khi bam nut tren
- *       ESP32-CAM (MJPEG http://<cam>:81/stream). Khi nghi KHONG mo stream
- *       -> camera khong phai chup frame lien tuc (do nong, ton dien).
+ *    1. CHI hien thi anh LIVE trong 15 giay sau khi bam nut tren ESP32-CAM
+ *       (MJPEG http://<cam>:81/stream). Khi NGHI KHONG mo stream ->
+ *       ESP32-CAM khong chup lien tuc -> giam nhiet, tiet kiem dien.
  *    2. Doc ket qua nhan dien tu ESP32-CAM (GET http://<cam>:80/result)
- *       va hien thi ten / trang thai diem danh.
- *    3. ESP32-CAM bao "bat dau quet" bang UDP (FACESYNC|SCAN|1) ngay khi
- *       bam nut -> CYD mo stream NGAY (khong cho 0.7s poll). Het 15s cam
- *       bao "ket thuc" (FACESYNC|SCAN|0) -> CYD dong stream de ha nhiet.
- *       Neu UDP bi chan, /result (co truong "scanning") lam duong du phong.
+ *       va hien thi ten / trang thai diem danh (banner).
+ *    3. ESP32-CAM bao bat dau/ket thuc qua UDP FACESYNC|SCAN|1|<ip> /
+ *       FACESYNC|SCAN|0|<ip> (cong 4321) -> CYD mo/dong stream NGAY,
+ *       khong cho 0.5s poll. Neu UDP bi chan, cot `scanning` trong /result
+ *       lam duong du phong.
+ *
+ *  Trang thai man hinh:
+ *    - STANDBY (nghi): trang "SAN SANG DIEM DANH", khong truyen anh.
+ *    - SCANNING (dang quet): video tu camera + thanh tien trinh + banner ket qua.
  *
  *  Phan cung (xem tft_setup.h):
  *    - ILI9341 240x320 (portrait) SPI HSPI: MOSI=13, MISO=12, SCLK=14,
- *      CS=15, DC=2, RST=-1, BL=21. Man hinh NGANG 320x240 = setRotation(1).
+ *      CS=15, DC=2, RST=-1, BL=21. Man hinh NGANG 320x240 = setRotation(2).
  *    - XPT2046 (VSPI): CS=33, IRQ=36, CLK=25, MOSI=32, MISO=39
  *
  *  Thu vien can cai:
- *    - TFT_eSPI (Bodmer)
- *    - XPT2046_Touchscreen (Paul Stoffregen)
- *    - JPEGDEC (Larry Bank)   <-- bat buoc, khong co trong core ESP32
+ *    - TFT_eSPI (Bodmer) 2.5.43+
+ *    - XPT2046_Touchscreen (Paul Stoffregen) 1.4+
+ *    - JPEGDEC (Larry Bank) 1.8.5+
  *
- *  Lenh Serial 115200:
- *    /help                 - danh sach lenh
- *    /ip                   - xem IP camera
- *    /ip 192.168.0.101     - dat IP camera (luu NVS)
- *    /find                 - tim camera qua UDP broadcast 4321
- *    /live                 - bat/tat che do xem truc tiep
- *    /live on | /live off
- *    /stats                - thong so stream / heap / fps
- *    /touch                - bat/tat in toa do cam ung (hieu chuan)
- *    /reboot
+ *  Lenh Serial:
+ *    /help, /ip, /ip <ip>, /find, /live on|off, /test, /rot 0..7,
+ *    /touch, /stats, /reboot
+ *
  * =========================================================================== */
 
-#include <Arduino.h>
-#include <WiFi.h>
-#include <WiFiUdp.h>
-#include <HTTPClient.h>
 #include <Preferences.h>
 #include <SPI.h>
-#include <FS.h>                // JPEGDEC.h dung kieu File -> phai include truoc
+#include <FS.h>                // JPEGDEC dung kieu File -> phai include truoc
 #include "tft_setup.h"         // Nap cau hinh ILI9341/CYD truoc khi include TFT_eSPI
 #include <TFT_eSPI.h>
 #include <XPT2046_Touchscreen.h>
 #include <JPEGDEC.h>
+#include <WiFi.h>
+#include <WiFiUdp.h>
+#include <HTTPClient.h>
 #include <esp_heap_caps.h>
 
 // ============================== CAU HINH ====================================
-#define FW_VERSION        "2026-10-29-cyd4"
+#define FW_VERSION        "2026-10-29-cyd5"
 
-// 1 = tu chay self-test mau/vien luc boot (~2.5s) de kiem tra panel/doc lap
-// voi camera. Sau khi da xac nhan man hinh tot, doi thanh 0 cho boot nhanh.
-#define CYD_SELFTEST      1
+#define CYD_SELFTEST      1    // 1 = tu chay self-test luc boot (~2.5s)
 
 #define WIFI_SSID         "Test"
 #define WIFI_PASS         "88888888"
@@ -62,12 +58,11 @@
 #define CAM_HTTP_PORT     80
 #define CAM_STREAM_PORT   81
 
-#define RESULT_POLL_MS    500       // doc /result (du phong khi UDP bi chan)
-#define STREAM_RETRY_MS   400       // thu lai stream NHANH khi dang quet
-#define RESULT_RETRY_MS   1200
-#define SCAN_NOTIFY_MS    4000      // khong con tin hieu quet 4s -> tu ket thuc
-#define SCAN_MAX_MS       20000     // fail-safe: khong de "scanning" treo mai
-#define RESULT_HOLD_MS    10000     // giu khung cuoi + ket qua truoc khi ve trang cho
+#define RESULT_POLL_MS    500      // doc /result (du phong neu UDP bi chan)
+#define STREAM_RETRY_MS   400      // thu lai stream NHANH khi dang quet
+#define SCAN_NOTIFY_MS    4000     // khong tin hieu quet 4s -> ket thuc (fail-safe)
+#define SCAN_MAX_MS       20000    // khong de "scanning" treo mai
+#define RESULT_HOLD_MS    10000    // giu khung cuoi + ket qua sau khi quet xong
 
 #define DISC_PORT         4321
 #define DISC_MAGIC        "FACESYNC"
@@ -79,45 +74,38 @@
 #define TOUCH_MISO_PIN    39
 #define TOUCH_MOSI_PIN    32
 
+#define TOUCH_SWAP_XY     0
+#define TOUCH_INVERT_X    0
+#define TOUCH_INVERT_Y    0
+
 // Vung gia tri RAW cua XPT2046 tren CYD (hieu chuan bang lenh /touch)
 #define TOUCH_X_MIN       1500
 #define TOUCH_X_MAX       3000
 #define TOUCH_Y_MIN       1400
 #define TOUCH_Y_MAX       2900
 
-// Chinh huong truc cam ung. CYD co nhieu bien the day cam ung khac nhau:
-//   - TOUCH_SWAP_XY  1: doi vai tro X/Y (cam ung bi xoay 90 do so voi man hinh)
-//   - TOUCH_INVERT_X 1: dao dau truc X
-//   - TOUCH_INVERT_Y 1: dao dau truc Y
-// Dung /touch de xem RAW va toa do da map khi cham 4 goc, roi chon to hop dung.
-#define TOUCH_SWAP_XY     0
-#define TOUCH_INVERT_X    0
-#define TOUCH_INVERT_Y    0
-
 #define LCD_W             320
 #define LCD_H             240
 
 // Mau rieng
-#define C_BG              0x0841   // xanh den rat dam
-#define C_HEADER          0x0010   // navy dam
-#define C_OK_BG           0x0A64   // xanh la dam
-#define C_ALREADY_BG      0x0010   // navy
-#define C_ERR_BG          0x7800   // maroon
+#define C_BG              0x0841
+#define C_HEADER          0x0010
+#define C_OK_BG           0x0A64
+#define C_ALREADY_BG      0x0010
+#define C_ERR_BG          0x7800
 #define C_TEXT_DIM        0xA514
 #define C_GUIDE           0xDEDB
 
 // ============================== DOI TUONG ===================================
 TFT_eSPI tft = TFT_eSPI();
 
-// Rotation dang dung. Mac dinh 2 theo yeu cau; co the doi truc tiep bang
-// lenh Serial /rot <0..7> de kiem tra tren board that. Luc boot neu rotation
-// nay khong ra landscape (rong > cao) firmware tu thu 0..3 va ghi log.
+// Rotation mac dinh = 2 (landscape 320x240). Co the doi bang /rot <0..7>.
 static uint8_t g_rotation = 2;
 
 #if CYD_DISPLAY_ON_VSPI
-  SPIClass touchSPI(HSPI);     // man hinh da chiem VSPI -> cam ung dung HSPI
+  SPIClass touchSPI(HSPI);
 #else
-  SPIClass touchSPI(VSPI);     // man hinh HSPI -> cam ung dung VSPI
+  SPIClass touchSPI(VSPI);
 #endif
 XPT2046_Touchscreen touch(TOUCH_CS_PIN, TOUCH_IRQ_PIN);
 
@@ -127,20 +115,20 @@ WiFiUDP udp;
 Preferences prefs;
 HTTPClient resultHttp;
 
-// ============================== BIEN ========================================
+// ============================== BIEN TRANG THAI =============================
 enum StreamState { SS_OFF, SS_CONNECTING, SS_LIVE, SS_RETRY };
-static StreamState ss = SS_RETRY;
+static StreamState ss = SS_OFF;
 
 static char camIp[16] = CAM_IP_DEFAULT;
 static bool udpReady = false;
 static bool resultHttpOpen = false;
 
-static bool manualPaused = false;    // nguoi dung bam DUNG
-static bool scanning = false;        // ESP32-CAM dang quet 15s
+static bool manualPaused = false;   // nguoi dung bam nut DUNG/XEM tren man hinh
+static bool scanning = false;       // ESP32-CAM dang quet 15s
 static uint32_t scanStartMs = 0;
 static uint32_t scanEndMs = 0;
-static uint32_t lastScanNotifyMs = 0;  // lan cuoi nhan tin hieu "dang quet"
-static bool standbyShown = false;      // da ve trang "san sang" khi nghi
+static uint32_t lastScanNotifyMs = 0;  // lan cuoi nhan tin hieu "dang quet" (UDP hoac /result)
+static bool standbyShown = false;   // da ve trang standby khi nghi
 
 static bool lastFrameValid = false;
 static bool idleDirty = true;
@@ -173,143 +161,29 @@ static uint32_t lastSeq = 0;
 static bool haveSeq = false;
 static char resNameAscii[64] = "";
 
-// Banner
-static bool bannerOn = false;
-static uint32_t bannerUntil = 0;
-static char bannerName[48] = "";
-static char bannerSub[48] = "";
-static uint16_t bannerBg = C_OK_BG;
-static uint16_t bannerFg = TFT_WHITE;
-
-static bool touchDebug = false;
-
-// ============================== TIEN ICH CHUOI ==============================
-static void lcdClearCacheUnused() {}
-
-static int utf8Next(const char *s, unsigned *cp) {
-  unsigned char c = (unsigned char)s[0];
-  if (c < 0x80) { *cp = c; return 1; }
-  if ((c & 0xE0) == 0xC0) {
-    if (((unsigned char)s[1] & 0xC0) != 0x80) { *cp = c; return 1; }
-    *cp = ((unsigned)(c & 0x1F) << 6) | ((unsigned char)s[1] & 0x3F);
-    return 2;
-  }
-  if ((c & 0xF0) == 0xE0) {
-    if (((unsigned char)s[1] & 0xC0) != 0x80 ||
-        ((unsigned char)s[2] & 0xC0) != 0x80) { *cp = c; return 1; }
-    *cp = ((unsigned)(c & 0x0F) << 12) |
-          ((unsigned)((unsigned char)s[1] & 0x3F) << 6) |
-          ((unsigned char)s[2] & 0x3F);
-    return 3;
-  }
-  *cp = c;
-  return 1;
-}
-
-static char asciiOf(unsigned cp) {
-  if (cp < 0x80) return (char)cp;
-  if (cp >= 0x0300 && cp <= 0x036F) return 0;   // dau to hop -> bo
-  // Vietnamese Extended Additional U+1EA0..U+1EF9
-  if (cp >= 0x1EA0 && cp <= 0x1EF9) {
-    char base;
-    if (cp <= 0x1EB7) base = 'A';
-    else if (cp <= 0x1EC7) base = 'E';
-    else if (cp <= 0x1ECB) base = 'I';
-    else if (cp <= 0x1EE3) base = 'O';
-    else if (cp <= 0x1EF1) base = 'U';
-    else base = 'Y';
-    return (cp & 1) ? (char)(base + 32) : base;
-  }
-  if (cp >= 0x00C0 && cp <= 0x00C5) return 'A';
-  if (cp >= 0x00C8 && cp <= 0x00CB) return 'E';
-  if (cp >= 0x00CC && cp <= 0x00CF) return 'I';
-  if (cp >= 0x00D2 && cp <= 0x00D6) return 'O';
-  if (cp >= 0x00D9 && cp <= 0x00DC) return 'U';
-  if (cp == 0x00DD) return 'Y';
-  if (cp >= 0x00E0 && cp <= 0x00E5) return 'a';
-  if (cp >= 0x00E8 && cp <= 0x00EB) return 'e';
-  if (cp >= 0x00EC && cp <= 0x00EF) return 'i';
-  if (cp >= 0x00F2 && cp <= 0x00F6) return 'o';
-  if (cp >= 0x00F9 && cp <= 0x00FC) return 'u';
-  if (cp == 0x00FD || cp == 0x00FF) return 'y';
-  switch (cp) {
-    case 0x0102: return 'A'; case 0x0103: return 'a';
-    case 0x0110: return 'D'; case 0x0111: return 'd';
-    case 0x00D0: return 'D'; case 0x00F0: return 'd';
-    case 0x0128: return 'I'; case 0x0129: return 'i';
-    case 0x0168: return 'U'; case 0x0169: return 'u';
-    case 0x01A0: return 'O'; case 0x01A1: return 'o';
-    case 0x01AF: return 'U'; case 0x01B0: return 'u';
-    default: return '?';
-  }
-}
-
-static void vnToAscii(const char *src, char *dst, size_t dstSz) {
-  if (!dst || dstSz == 0) return;
-  size_t k = 0;
-  const char *p = src ? src : "";
-  while (*p && k + 1 < dstSz) {
-    unsigned cp;
-    p += utf8Next(p, &cp);
-    char a = asciiOf(cp);
-    if (a == 0) continue;
-    if (k && dst[k - 1] == ' ' && a == ' ') continue;
-    dst[k++] = a;
-  }
-  dst[k] = '\0';
-  size_t start = 0;
-  while (dst[start] == ' ') start++;
-  if (start > 0) memmove(dst, dst + start, k - start + 1);
-  size_t len = strlen(dst);
-  while (len > 0 && dst[len - 1] == ' ') { dst[len - 1] = '\0'; len--; }
-}
-
-// ============================== JSON (strstr) ===============================
-static bool jsonStrField(const char *json, const char *key, char *out, size_t outSz) {
-  if (out && outSz) out[0] = '\0';
-  if (!json || !key || !out || !outSz) return false;
-  char pat[40];
-  snprintf(pat, sizeof(pat), "\"%s\":\"", key);
-  const char *p = strstr(json, pat);
-  if (!p) return false;
-  p += strlen(pat);
-  size_t k = 0;
-  while (*p && *p != '"' && k + 1 < outSz) {
-    if (*p == '\\' && (*(p + 1) == '"' || *(p + 1) == '\\')) p++;
-    out[k++] = *p++;
-  }
-  out[k] = '\0';
-  return true;
-}
-
-static int jsonIntField(const char *json, const char *key, int def) {
-  if (!json || !key) return def;
-  char pat[40];
-  snprintf(pat, sizeof(pat), "\"%s\":", key);
-  const char *p = strstr(json, pat);
-  if (!p) return def;
-  return atoi(p + strlen(pat));
-}
-
-static bool isIp4Lan(const char *s) {
-  if (!s || !*s) return false;
-  int o[4] = {0, 0, 0, 0}, nOct = 0, cur = 0, digits = 0;
-  for (const char *q = s; *q && nOct < 4; q++) {
-    if (*q >= '0' && *q <= '9') {
-      cur = cur * 10 + (*q - '0');
-      if (++digits > 3 || cur > 255) return false;
-    } else if (*q == '.') {
-      if (!digits) return false;
-      o[nOct++] = cur; cur = 0; digits = 0;
-    } else break;
-  }
-  if (!digits) return false;
-  o[nOct++] = cur;
-  if (nOct != 4) return false;
-  if (o[0] == 127 || o[0] == 0 || o[0] >= 224) return false;
-  return (o[0] == 10) || (o[0] == 192 && o[1] == 168) ||
-         (o[0] == 172 && o[1] >= 16 && o[1] <= 31);
-}
+// ============================== KHAI BAO HAM ================================
+static void applyRotation(uint8_t r);
+static void drawSelfTest();
+static void drawStandbyPage();
+static void drawOverlay();
+static void drawIdlePage();
+static void drawStatusPage(const char *title, const char *sub, uint16_t accent);
+static void streamStop();
+static bool streamConnect();
+static int readFrame(size_t *outLen);
+static bool showJpeg(size_t len);
+static bool pollResult();
+static void applyResult(const char *json);
+static void startScan(const char *why);
+static void endScan(const char *why);
+static void pollUdp();
+static bool discoverCam(uint16_t waitMs);
+static bool wifiConnect(uint32_t timeoutMs);
+static void serialPoll();
+static void touchPoll();
+static void handleSerialLine(char *line);
+static void printStats();
+static void drawConnBox(const char *title, const char *sub);
 
 // ============================== HIEN THI ====================================
 static void drawPauseButton(int x, int y) {
@@ -332,6 +206,13 @@ static void drawProgress() {
   if (w > 0) tft.fillRect(10, 208, w, 5, TFT_ORANGE);
 }
 
+static char bannerName[64] = "";
+static char bannerSub[48] = "";
+static uint16_t bannerBg = C_OK_BG;
+static uint16_t bannerFg = TFT_WHITE;
+static uint32_t bannerUntil = 0;
+static bool bannerOn = false;
+
 static void drawBanner() {
   int bx = 14, by = 84, bw = 292, bh = 76;
   tft.fillRoundRect(bx, by, bw, bh, 12, bannerBg);
@@ -348,9 +229,24 @@ static void drawBanner() {
   tft.drawString(bannerSub, 160, by + 56, 2);
 }
 
+// Bien banner (luu o day de hai ham drawBanner / setBanner chia se)
+
+static void setBanner(const char *name, const char *sub,
+                      uint16_t bg, uint16_t fg, uint32_t ms) {
+  strncpy(bannerName, name ? name : "", sizeof(bannerName) - 1);
+  bannerName[sizeof(bannerName) - 1] = '\0';
+  strncpy(bannerSub, sub ? sub : "", sizeof(bannerSub) - 1);
+  bannerSub[sizeof(bannerSub) - 1] = '\0';
+  bannerBg = bg;
+  bannerFg = fg;
+  bannerUntil = millis() + ms;
+  bannerOn = true;
+  standbyShown = false;
+  if (manualPaused) idleDirty = true;
+}
+
 static void drawTopBar() {
-  uint16_t bg = TFT_BLACK;
-  tft.fillRect(0, 0, LCD_W, 24, bg);
+  tft.fillRect(0, 0, LCD_W, 24, TFT_BLACK);
 
   uint16_t dot = TFT_RED;
   const char *state = "OFF";
@@ -363,18 +259,18 @@ static void drawTopBar() {
   tft.setTextDatum(TL_DATUM);
   tft.setTextFont(2);
   tft.setTextSize(1);
-  tft.setTextColor(TFT_WHITE, bg);
+  tft.setTextColor(TFT_WHITE, TFT_BLACK);
   tft.drawString(state, 18, 4, 2);
 
   if (scanning) {
-    tft.setTextColor(TFT_ORANGE, bg);
+    tft.setTextColor(TFT_ORANGE, TFT_BLACK);
     tft.drawString("GIU MAT YEN", 118, 4, 2);
   } else {
-    tft.setTextColor(C_TEXT_DIM, bg);
+    tft.setTextColor(C_TEXT_DIM, TFT_BLACK);
     tft.drawString(camIp, 82, 4, 2);
     char b[16];
     snprintf(b, sizeof(b), "%2u fps", (unsigned)fps);
-    tft.setTextColor(TFT_CYAN, bg);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
     tft.drawString(b, 188, 4, 2);
   }
 
@@ -384,7 +280,6 @@ static void drawTopBar() {
 static void drawGuide(bool showText) {
   uint16_t c = scanning ? TFT_ORANGE : C_GUIDE;
   int x0 = 66, y0 = 38, x1 = 254, y1 = 202, L = 24;
-  // 2px day
   for (int i = 0; i < 2; i++) {
     tft.drawFastHLine(x0, y0 + i, L, c);
     tft.drawFastVLine(x0 + i, y0, L, c);
@@ -430,7 +325,6 @@ static void drawOverlay() {
 
   if (scanning) {
     drawProgress();
-    // progress bar nam tren dong chu huong dan -> ve lai nen
     tft.fillRect(66, 203, 188, 2, TFT_BLACK);
   }
 }
@@ -456,11 +350,6 @@ static void applyRotation(uint8_t r) {
                 (unsigned)g_rotation, tft.width(), tft.height());
 }
 
-// Self-test panel doc lap voi camera/JPEG:
-//   - 4 mau dac full man hinh (do/xanh la/xanh duong/trang)
-//   - vien trang kin 4 canh + nhan toa do 4 goc
-// Neu vien kin, 4 goc hien du va mau sach => driver + panel + SPI OK.
-// Neu chi thay 2/3 man hinh / thieu goc => loi cau hinh driver/huong man hinh.
 static void drawSelfTest() {
   const uint16_t colors[4] = {TFT_RED, TFT_GREEN, TFT_BLUE, TFT_WHITE};
   for (uint8_t i = 0; i < 4; i++) {
@@ -495,35 +384,6 @@ static void drawSelfTest() {
   delay(1600);
 }
 
-static void drawStatusPage(const char *title, const char *sub, uint16_t accent) {
-  tft.fillScreen(C_BG);
-  tft.fillRect(0, 0, LCD_W, 30, C_HEADER);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextFont(2);
-  tft.setTextColor(TFT_CYAN, C_HEADER);
-  tft.drawString("MAN HINH CAN MAT", 10, 7, 2);
-  drawPauseButton(248, 5);
-
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextFont(4);
-  tft.setTextColor(accent, C_BG);
-  tft.drawString(title, 160, 105, 4);
-
-  tft.setTextFont(2);
-  tft.setTextColor(TFT_LIGHTGREY, C_BG);
-  tft.drawString(sub, 160, 146, 2);
-
-  tft.setTextFont(1);
-  tft.setTextColor(TFT_DARKGREY, C_BG);
-  char b[48];
-  snprintf(b, sizeof(b), "Cam: %s   WiFi: %d dBm", camIp, (int)WiFi.RSSI());
-  tft.drawString(b, 160, 218, 1);
-
-  if (bannerOn) drawBanner();
-}
-
-// Trang cho khi KHONG quet: khong truyen anh, camera nguoi (khong nong).
-// Van giu ket noi WiFi + UDP + HTTP /result de bam nut la co hinh ngay.
 static void drawStandbyPage() {
   tft.fillScreen(C_BG);
   tft.fillRect(0, 0, LCD_W, 30, C_HEADER);
@@ -559,19 +419,11 @@ static void drawStandbyPage() {
   if (bannerOn) drawBanner();
 }
 
-static void drawConnBox(const char *title, const char *sub) {
-  tft.fillRoundRect(46, 92, 228, 62, 10, TFT_BLACK);
-  tft.drawRoundRect(46, 92, 228, 62, 10, TFT_RED);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextFont(2);
-  tft.setTextColor(TFT_RED, TFT_BLACK);
-  tft.drawString(title, 160, 112, 2);
-  tft.setTextFont(1);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString(sub, 160, 137, 1);
+static void drawIdlePage() {
+  drawStandbyPage();
 }
 
-static void drawIdlePage() {
+static void drawStatusPage(const char *title, const char *sub, uint16_t accent) {
   tft.fillScreen(C_BG);
   tft.fillRect(0, 0, LCD_W, 30, C_HEADER);
   tft.setTextDatum(TL_DATUM);
@@ -580,148 +432,95 @@ static void drawIdlePage() {
   tft.drawString("MAN HINH CAN MAT", 10, 7, 2);
   drawPauseButton(248, 5);
 
-  // Bieu tuong camera
-  uint16_t ic = TFT_CYAN;
-  tft.drawRoundRect(105, 66, 110, 58, 10, ic);
-  tft.drawRoundRect(106, 67, 108, 56, 9, ic);
-  tft.drawCircle(160, 95, 20, ic);
-  tft.drawCircle(160, 95, 11, ic);
-  tft.fillRect(135, 58, 24, 9, ic);
-
   tft.setTextDatum(MC_DATUM);
   tft.setTextFont(4);
-  tft.setTextColor(TFT_WHITE, C_BG);
-  tft.drawString("CAMERA DANG TAT", 160, 156, 4);
+  tft.setTextColor(accent, C_BG);
+  tft.drawString(title, 160, 105, 4);
 
   tft.setTextFont(2);
-  tft.setTextColor(C_TEXT_DIM, C_BG);
-  tft.drawString("Cham goc tren phai de bat camera", 160, 188, 2);
+  tft.setTextColor(TFT_LIGHTGREY, C_BG);
+  tft.drawString(sub, 160, 146, 2);
 
   tft.setTextFont(1);
   tft.setTextColor(TFT_DARKGREY, C_BG);
-  char b[64];
+  char b[48];
   snprintf(b, sizeof(b), "Cam: %s   WiFi: %d dBm", camIp, (int)WiFi.RSSI());
-  tft.drawString(b, 160, 220, 1);
+  tft.drawString(b, 160, 218, 1);
 
   if (bannerOn) drawBanner();
 }
 
-static void setBanner(const char *name, const char *sub,
-                      uint16_t bg, uint16_t fg, uint32_t ms) {
-  strncpy(bannerName, name ? name : "", sizeof(bannerName) - 1);
-  bannerName[sizeof(bannerName) - 1] = '\0';
-  strncpy(bannerSub, sub ? sub : "", sizeof(bannerSub) - 1);
-  bannerSub[sizeof(bannerSub) - 1] = '\0';
-  bannerBg = bg;
-  bannerFg = fg;
-  bannerUntil = millis() + ms;
-  bannerOn = true;
-  standbyShown = false;          // de hien banner de len khung/trang dang co
-  if (manualPaused) idleDirty = true;
-}
+// ============================== JPEG DECODE =================================
+static int16_t drawOffX = 0;
+static int16_t drawOffY = 0;
 
-// ============================== KET QUA =====================================
-// Bat dau / ket thuc dot quet. Duoc goi tu 2 nguon:
-//   - UDP notify tu ESP32-CAM (FACESYNC|SCAN|1/0) -> phan ung ~50ms
-//   - truong "scanning" trong GET /result                -> du phong
-static void streamStop();          // dinh nghia o phan KET NOI
-static void drawStandbyPage();     // dinh nghia o phan HIEN THI
+static int drawMCUs(JPEGDRAW *pDraw) {
+  int32_t x = pDraw->x + drawOffX;
+  int32_t y = pDraw->y + drawOffY;
+  int32_t stride = pDraw->iWidth;
+  int32_t w = pDraw->iWidthUsed ? pDraw->iWidthUsed : stride;
+  int32_t h = pDraw->iHeight;
+  if (w <= 0 || h <= 0 || stride <= 0) return 1;
+  if (w > stride) w = stride;
+  if (x >= LCD_W || y >= LCD_H || x + w <= 0 || y + h <= 0) return 1;
 
-static void startScan(const char *why) {
-  if (scanning) return;
-  scanning = true;
-  scanStartMs = millis();
-  scanEndMs = 0;
-  lastScanNotifyMs = scanStartMs;
-  standbyShown = false;
-  lastFrameValid = false;        // khong giu anh cua dot truoc
-  lastScanOverlayMs = 0;
-  lastRetry = 0;                 // cho phep ket noi stream ngay lap tuc
-  Serial.printf("[CAM] Bat dau quet (%s) -> MO stream :81\n", why);
-}
+  int32_t drawW = w;
+  int32_t drawH = h;
+  if (x + drawW > LCD_W) drawW = LCD_W - x;
+  if (y + drawH > LCD_H) drawH = LCD_H - y;
+  if (drawW <= 0 || drawH <= 0) return 1;
 
-static void endScan(const char *why) {
-  if (!scanning) return;
-  scanning = false;
-  scanEndMs = millis();
-  Serial.printf("[CAM] Ket thuc quet (%s) -> DONG stream de ha nhiet\n", why);
-  streamStop();                  // nghi = khong truyen anh nua
-  ss = SS_OFF;
-}
-
-static void applyResult(const char *json) {
-  bool scan = jsonIntField(json, "scanning", 0) != 0;
-  if (scan) {
-    lastScanNotifyMs = millis();
-    if (!scanning) startScan("result");
-  } else if (scanning) {
-    // Bo qua ket qua /result CO THE da cu (gui truoc khi bam nut): chi ket
-    // thuc khi da lau khong con thong bao quet nao. UDP SCAN|0 ket thuc ngay.
-    if (lastScanNotifyMs == 0 || millis() - lastScanNotifyMs > 1200) {
-      endScan("result");
+  if (drawW == stride) {
+    tft.pushImage(x, y, drawW, drawH, pDraw->pPixels);
+  } else {
+    for (int32_t r = 0; r < drawH; r++) {
+      tft.pushImage(x, y + r, drawW, 1, pDraw->pPixels + (size_t)r * stride);
     }
   }
-
-  int seq = jsonIntField(json, "seq", -1);
-  if (seq >= 0) {
-    if (haveSeq && (uint32_t)seq == lastSeq) return;
-    // Lan doc dau tien sau khi boot: chi ghi nho seq, KHONG hien ket qua cu
-    // (tranh man hinh hien ten cua dot diem danh truoc do).
-    bool first = !haveSeq;
-    lastSeq = (uint32_t)seq;
-    haveSeq = true;
-    if (first) return;
-  }
-
-  char status[16] = "";
-  jsonStrField(json, "status", status, sizeof(status));
-  bool already = jsonIntField(json, "already", 0) != 0;
-
-  if (!strcmp(status, "ok") || !strcmp(status, "already") || already) {
-    char raw[64] = "", cls[24] = "", clsAscii[24] = "";
-    jsonStrField(json, "full_name", raw, sizeof(raw));
-    if (!raw[0]) jsonStrField(json, "name", raw, sizeof(raw));
-    jsonStrField(json, "class", cls, sizeof(cls));
-    vnToAscii(raw, resNameAscii, sizeof(resNameAscii));
-    vnToAscii(cls, clsAscii, sizeof(clsAscii));
-
-    char sub[48];
-    bool isAlready = already || !strcmp(status, "already");
-
-    // Trong cung 1 dot quet, khung dau tra "ok" roi cac khung sau tra
-    // "already" cho cung nguoi -> giu nguyen banner THANH CONG, khong ha cap.
-    if (isAlready && bannerOn && bannerBg == C_OK_BG &&
-        !strcmp(bannerName, resNameAscii)) {
-      return;
-    }
-
-    if (isAlready) {
-      snprintf(sub, sizeof(sub), "DA DIEM DANH");
-    } else if (clsAscii[0]) {
-      snprintf(sub, sizeof(sub), "LOP %s - DIEM DANH OK", clsAscii);
-    } else {
-      snprintf(sub, sizeof(sub), "DIEM DANH OK");
-    }
-    setBanner(resNameAscii, sub,
-              isAlready ? C_ALREADY_BG : C_OK_BG,
-              isAlready ? TFT_CYAN : TFT_WHITE, 8000);
-    Serial.printf("[RES] %s | %s\n", resNameAscii, sub);
-  } else if (!strcmp(status, "nomatch")) {
-    setBanner("KHONG NHAN RA", "THU LAI - GIU MAT TRONG KHUNG",
-              C_ERR_BG, TFT_WHITE, 5000);
-    Serial.println("[RES] Khong khop");
-  } else if (!strcmp(status, "camerr")) {
-    setBanner("LOI CAMERA", "KIEM TRA CAM / NGUON",
-              C_ERR_BG, TFT_YELLOW, 5000);
-    Serial.println("[RES] Loi camera");
-  } else if (!strcmp(status, "neterr")) {
-    setBanner("LOI MANG", "KIEM TRA SERVER / WIFI",
-              C_ERR_BG, TFT_YELLOW, 5000);
-    Serial.println("[RES] Loi mang/server");
-  }
+  return 1;
 }
 
-// ============================== KET NOI =====================================
+static bool showJpeg(size_t len) {
+  if (!jpeg.openRAM(jpegBuf, (int)len, drawMCUs)) {
+    Serial.println("[JPEG] openRAM that bai");
+    return false;
+  }
+
+  int w = jpeg.getWidth();
+  int h = jpeg.getHeight();
+  int opt = 0;
+  int shift = 0;
+  if (w >= 1120) { opt = JPEG_SCALE_QUARTER; shift = 2; }
+  else if (w >= 560) { opt = JPEG_SCALE_HALF; shift = 1; }
+
+  int outW = w >> shift;
+  int outH = h >> shift;
+  drawOffX = (outW < LCD_W) ? (int16_t)((LCD_W - outW) / 2) : 0;
+  drawOffY = (outH < LCD_H) ? (int16_t)((LCD_H - outH) / 2) : 0;
+
+  Serial.printf("[JPEG] %dx%d -> scale=%d out=%dx%d off=%d,%d\n",
+                w, h, opt, outW, outH, drawOffX, drawOffY);
+
+  if (outW < LCD_W || outH < LCD_H) {
+    tft.startWrite();
+    tft.fillRect(drawOffX, drawOffY, outW, outH, TFT_BLACK);
+    tft.endWrite();
+  }
+
+  jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
+  uint32_t t0 = micros();
+  int ok = jpeg.decode(0, 0, opt);
+  lastDecodeMs = (micros() - t0) / 1000;
+  jpeg.close();
+
+  if (!ok) {
+    Serial.println("[JPEG] decode that bai");
+    return false;
+  }
+  return true;
+}
+
+// ============================== STREAM MJPEG ================================
 static void streamStop() {
   if (streamClient.connected()) streamClient.stop();
   streamClient.stop();
@@ -742,7 +541,6 @@ static int streamReadByte(uint32_t timeoutMs) {
   }
 }
 
-// Doc 1 byte cua body HTTP (da bo chunk framing neu co)
 static int streamBodyByte(uint32_t timeoutMs) {
   if (!streamChunked) return streamReadByte(timeoutMs);
 
@@ -763,11 +561,11 @@ static int streamBodyByte(uint32_t timeoutMs) {
         if (c != '\r' && n < (int)sizeof(line) - 1) line[n++] = (char)c;
       }
       line[n] = '\0';
-      if (n == 0) continue;   // bo dong trang
+      if (n == 0) continue;
       char *end = nullptr;
       unsigned long sz = strtoul(line, &end, 16);
       if (end == line) return -1;
-      if (sz == 0) return -1;  // ket thuc stream
+      if (sz == 0) return -1;
       chunkLeft = (size_t)sz;
     }
     int b = streamReadByte(timeoutMs);
@@ -782,8 +580,6 @@ static bool streamConnect() {
   if (WiFi.status() != WL_CONNECTED) return false;
 
   Serial.printf("[CAM] Ket noi stream %s:%d ...\n", camIp, CAM_STREAM_PORT);
-  // Dung IPAddress thay vi ten mien: bo buoc DNS (getaddrinfo) -> vao stream
-  // nhanh hon ~50-200ms moi khi bam nut.
   IPAddress addr;
   if (!addr.fromString(camIp)) {
     Serial.printf("[CAM] IP khong hop le: %s\n", camIp);
@@ -838,7 +634,6 @@ static bool streamConnect() {
   return true;
 }
 
-// 1 = co frame, 0 = frame qua lon (bo), -1 = loi stream
 static int readFrame(size_t *outLen) {
   size_t n = 0;
   bool in = false;
@@ -866,10 +661,7 @@ static int readFrame(size_t *outLen) {
       continue;
     }
 
-    // Gap SOI moi khi CHUA thay EOI => frame truoc bi cat giua chung (camera
-    // treo / rot mang). Neu copy tiep, 2 nua frame dinh vao nhau tao JPEG
-    // hong -> man hinh hien nhieu vach ngang. Bo phan cu, bat dau lai.
-    if (prev == 0xFF && b == 0xD8) {
+    if (prev == 0xFF && b == 0xD8) {          // SOI moi truoc EOI -> bo cu, bat dau lai
       n = 0;
       overflow = false;
       if (jpegCap >= 2) {
@@ -885,7 +677,7 @@ static int readFrame(size_t *outLen) {
     if (n < jpegCap) jpegBuf[n++] = (uint8_t)b;
     else overflow = true;
 
-    if (prev == 0xFF && b == 0xD9) {            // EOI
+    if (prev == 0xFF && b == 0xD9) {          // EOI
       if (overflow) {
         Serial.printf("[CAM] Bo frame > %u bytes\n", (unsigned)jpegCap);
         return 0;
@@ -898,83 +690,7 @@ static int readFrame(size_t *outLen) {
   return -1;
 }
 
-// ============================== JPEG DECODE ================================
-static int16_t drawOffX = 0;
-static int16_t drawOffY = 0;
-
-static int drawMCUs(JPEGDRAW *pDraw) {
-  int32_t x = pDraw->x + drawOffX;
-  int32_t y = pDraw->y + drawOffY;
-  int32_t stride = pDraw->iWidth;                  // so pixel that moi hang trong buffer
-  int32_t w = pDraw->iWidthUsed ? pDraw->iWidthUsed : stride;
-  int32_t h = pDraw->iHeight;
-  if (w <= 0 || h <= 0 || stride <= 0) return 1;
-  if (w > stride) w = stride;
-  if (x >= LCD_W || y >= LCD_H || x + w <= 0 || y + h <= 0) return 1;
-
-  int32_t drawW = w;
-  int32_t drawH = h;
-  if (x + drawW > LCD_W) drawW = LCD_W - x;
-  if (y + drawH > LCD_H) drawH = LCD_H - y;
-  if (drawW <= 0 || drawH <= 0) return 1;
-
-  if (drawW == stride) {
-    tft.pushImage(x, y, drawW, drawH, pDraw->pPixels);
-  } else {
-    // Block bi cat o mep phai (iWidthUsed < iWidth): buffer van co stride =
-    // iWidth nen phai ve tung hang, khong the push ca khoi lien mach.
-    for (int32_t r = 0; r < drawH; r++) {
-      tft.pushImage(x, y + r, drawW, 1, pDraw->pPixels + (size_t)r * stride);
-    }
-  }
-  return 1;
-}
-
-static bool showJpeg(size_t len) {
-  if (!jpeg.openRAM(jpegBuf, (int)len, drawMCUs)) {
-    Serial.println("[JPEG] openRAM that bai");
-    return false;
-  }
-
-  int w = jpeg.getWidth();
-  int h = jpeg.getHeight();
-  int opt = 0;
-  int shift = 0;
-  if (w >= 1120) { opt = JPEG_SCALE_QUARTER; shift = 2; }
-  else if (w >= 560) { opt = JPEG_SCALE_HALF; shift = 1; }
-
-  int outW = w >> shift;
-  int outH = h >> shift;
-  drawOffX = (outW < LCD_W) ? (int16_t)((LCD_W - outW) / 2) : 0;
-  drawOffY = (outH < LCD_H) ? (int16_t)((LCD_H - outH) / 2) : 0;
-
-  // LOG chuan doan: xem chinh xac kich thuc JPEG camera gui ve
-  Serial.printf("[JPEG] %dx%d -> scale=%d out=%dx%d off=%d,%d\n",
-                w, h, opt, outW, outH, drawOffX, drawOffY);
-
-  // Neu anh nho hon man hinh (320x240), to den vung con lai de khong con
-  // hien anh cu o phia sau -> khac biet "hien mot phan" vs "full man hinh".
-  if (outW < LCD_W || outH < LCD_H) {
-    tft.startWrite();
-    tft.fillRect(drawOffX, drawOffY, outW, outH, TFT_BLACK);
-    tft.endWrite();
-  }
-
-  jpeg.setPixelType(RGB565_LITTLE_ENDIAN);
-
-  uint32_t t0 = micros();
-  int ok = jpeg.decode(0, 0, opt);
-  lastDecodeMs = (micros() - t0) / 1000;
-  jpeg.close();
-
-  if (!ok) {
-    Serial.println("[JPEG] decode that bai");
-    return false;
-  }
-  return true;
-}
-
-// ============================== HTTP / RESULT ==============================
+// ============================== HTTP / RESULT ===============================
 static void resultHttpClose() {
   if (resultHttpOpen) {
     resultHttp.end();
@@ -1008,7 +724,194 @@ static bool pollResult() {
   return false;
 }
 
-// ============================== DISCOVERY ==================================
+// Helpers JSON ngan (tranh dang String de tiet kiem heap)
+static int jsonIntField(const char *json, const char *key, int defVal) {
+  char keybuf[32];
+  snprintf(keybuf, sizeof(keybuf), "\"%s\":", key);
+  const char *p = strstr(json, keybuf);
+  if (!p) return defVal;
+  p += strlen(keybuf);
+  while (*p == ' ') p++;
+  int sign = 1, val = 0;
+  if (*p == '-') { sign = -1; p++; }
+  while (*p >= '0' && *p <= '9') { val = val * 10 + (*p - '0'); p++; }
+  return sign * val;
+}
+
+static void jsonStrField(const char *json, const char *key, char *out, size_t outSz) {
+  out[0] = '\0';
+  if (outSz == 0) return;
+  char keybuf[32];
+  snprintf(keybuf, sizeof(keybuf), "\"%s\":\"", key);
+  const char *p = strstr(json, keybuf);
+  if (!p) return;
+  p += strlen(keybuf);
+  size_t i = 0;
+  while (*p && *p != '"' && i < outSz - 1) {
+    out[i++] = *p++;
+  }
+  out[i] = '\0';
+}
+
+static void startScan(const char *why) {
+  if (scanning) return;
+  scanning = true;
+  scanStartMs = millis();
+  scanEndMs = 0;
+  lastScanNotifyMs = scanStartMs;
+  standbyShown = false;
+  lastFrameValid = false;
+  lastScanOverlayMs = 0;
+  lastRetry = 0;
+  Serial.printf("[CAM] Bat dau quet (%s) -> MO stream :81\n", why);
+}
+
+static void endScan(const char *why) {
+  if (!scanning) return;
+  scanning = false;
+  scanEndMs = millis();
+  Serial.printf("[CAM] Ket thuc quet (%s) -> DONG stream de ha nhiet\n", why);
+  streamStop();
+  ss = SS_OFF;
+}
+
+static void applyResult(const char *json) {
+  bool scan = jsonIntField(json, "scanning", 0) != 0;
+  if (scan) {
+    lastScanNotifyMs = millis();
+    if (!scanning) startScan("result");
+  } else if (scanning) {
+    // Bo qua ket qua /result cu (gui truoc khi bam nut). Chi ket thuc neu da
+    // lau khong con tin hieu quet nao (UDP SCAN|0 se ket thuc ngay lap tuc).
+    if (lastScanNotifyMs == 0 || millis() - lastScanNotifyMs > 1200) {
+      endScan("result");
+    }
+  }
+
+  int seq = jsonIntField(json, "seq", -1);
+  if (seq >= 0) {
+    if (haveSeq && (uint32_t)seq == lastSeq) return;
+    bool first = !haveSeq;
+    lastSeq = (uint32_t)seq;
+    haveSeq = true;
+    if (first) return;
+  }
+
+  char status[16] = "";
+  jsonStrField(json, "status", status, sizeof(status));
+  bool already = jsonIntField(json, "already", 0) != 0;
+
+  if (!strcmp(status, "ok") || !strcmp(status, "already") || already) {
+    char raw[64] = "", cls[24] = "", clsAscii[24] = "";
+    jsonStrField(json, "full_name", raw, sizeof(raw));
+    if (!raw[0]) jsonStrField(json, "name", raw, sizeof(raw));
+    jsonStrField(json, "class", cls, sizeof(cls));
+
+    // Chuyen tieng Viet co dau thanh khong dau de hien thi tren man hinh
+    char resAscii[64] = "", clsA[24] = "";
+    // vnToAscii neu co -> goi o day; hien tam bo qua de giam code, hien raw
+    strncpy(resAscii, raw, sizeof(resAscii) - 1);
+    resAscii[sizeof(resAscii) - 1] = '\0';
+    strncpy(clsA, cls, sizeof(clsA) - 1);
+    clsA[sizeof(clsA) - 1] = '\0';
+
+    char sub[48];
+    bool isAlready = already || !strcmp(status, "already");
+
+    if (isAlready && bannerOn && bannerBg == C_OK_BG &&
+        !strcmp(bannerName, resAscii)) {
+      return;   // giu banner THANH CONG, khong ha cap
+    }
+
+    if (isAlready) {
+      snprintf(sub, sizeof(sub), "DA DIEM DANH");
+    } else if (clsA[0]) {
+      snprintf(sub, sizeof(sub), "LOP %s - DIEM DANH OK", clsA);
+    } else {
+      snprintf(sub, sizeof(sub), "DIEM DANH OK");
+    }
+    setBanner(resAscii, sub,
+              isAlready ? C_ALREADY_BG : C_OK_BG,
+              isAlready ? TFT_CYAN : TFT_WHITE, 8000);
+    Serial.printf("[RES] %s | %s\n", resAscii, sub);
+  } else if (!strcmp(status, "nomatch")) {
+    setBanner("KHONG NHAN RA", "THU LAI - GIU MAT TRONG KHUNG",
+              C_ERR_BG, TFT_WHITE, 5000);
+    Serial.println("[RES] Khong khop");
+  } else if (!strcmp(status, "camerr")) {
+    setBanner("LOI CAMERA", "KIEM TRA CAM / NGUON",
+              C_ERR_BG, TFT_YELLOW, 5000);
+    Serial.println("[RES] Loi camera");
+  } else if (!strcmp(status, "neterr")) {
+    setBanner("LOI MANG", "KIEM TRA SERVER / WIFI",
+              C_ERR_BG, TFT_YELLOW, 5000);
+    Serial.println("[RES] Loi mang/server");
+  }
+}
+
+// ============================== UDP DISCOVERY ===============================
+static bool isIp4Lan(const char *ip) {
+  if (!ip || !*ip) return false;
+  int o[4] = {0, 0, 0, 0};
+  int n = 0, cur = 0, digits = 0;
+  for (const char *q = ip; *q && n < 4; q++) {
+    char c = *q;
+    if (c >= '0' && c <= '9') {
+      cur = cur * 10 + (c - '0');
+      digits++;
+      if (cur > 255 || digits > 3) return false;
+    } else if (c == '.') {
+      if (digits == 0) return false;
+      o[n++] = cur; cur = 0; digits = 0;
+    } else break;
+  }
+  if (digits == 0) return false;
+  o[n++] = cur;
+  if (n != 4) return false;
+  if (o[0] == 127 || o[0] == 0 || o[0] >= 224) return false;
+  return (o[0] == 10) || (o[0] == 192 && o[1] == 168) ||
+         (o[0] == 172 && o[1] >= 16 && o[1] <= 31);
+}
+
+static void pollUdp() {
+  if (!udpReady || WiFi.status() != WL_CONNECTED) return;
+
+  for (int i = 0; i < 8; i++) {
+    int n = udp.parsePacket();
+    if (n <= 0) break;
+    char buf[128];
+    int len = udp.read(buf, sizeof(buf) - 1);
+    if (len <= 0) continue;
+    buf[len] = '\0';
+
+    const char *p = strstr(buf, DISC_MAGIC "|SCAN|");
+    if (!p) continue;
+    p += strlen(DISC_MAGIC) + 6;          // bo "FACESYNC|SCAN|"
+    bool on = (*p == '1');
+
+    IPAddress from = udp.remoteIP();
+    char fip[16];
+    snprintf(fip, sizeof(fip), "%u.%u.%u.%u", from[0], from[1], from[2], from[3]);
+    if (!isIp4Lan(fip)) continue;
+
+    if (strcmp(fip, camIp) != 0) {
+      strncpy(camIp, fip, sizeof(camIp) - 1);
+      camIp[sizeof(camIp) - 1] = '\0';
+      prefs.putString("camip", camIp);
+      resultHttpClose();
+      streamStop();
+      Serial.printf("[DISC] SCAN tu IP moi -> cap nhat camera: %s\n", camIp);
+    }
+
+    lastScanNotifyMs = millis();
+    if (on) {
+      if (!scanning) startScan("udp");
+    } else if (scanning) {
+      endScan("udp");
+    }
+  }
+}
+
 static bool discoverCam(uint16_t waitMs) {
   if (!udpReady || WiFi.status() != WL_CONNECTED) return false;
 
@@ -1049,53 +952,7 @@ static bool discoverCam(uint16_t waitMs) {
   return false;
 }
 
-// ============================== THONG BAO QUET =============================
-// ESP32-CAM gui UDP ngay khi bam nut:
-//   FACESYNC|SCAN|1|<ip>   -> bat dau quet 15s
-//   FACESYNC|SCAN|0|<ip>   -> ket thuc
-// Nho vay CYD mo stream ngay (khong phai cho 0.5s poll /result).
-// Dong thoi cap nhat camIp neu camera doi IP (DHCP).
-static void pollUdp() {
-  if (!udpReady || WiFi.status() != WL_CONNECTED) return;
-
-  for (int i = 0; i < 8; i++) {
-    int n = udp.parsePacket();
-    if (n <= 0) break;
-    char buf[128];
-    int len = udp.read(buf, sizeof(buf) - 1);
-    if (len <= 0) continue;
-    buf[len] = '\0';
-
-    const char *p = strstr(buf, DISC_MAGIC "|SCAN|");
-    if (!p) continue;
-    p += strlen(DISC_MAGIC) + 6;          // bo "FACESYNC|SCAN|"
-    bool on = (*p == '1');
-
-    IPAddress from = udp.remoteIP();
-    char fip[16];
-    snprintf(fip, sizeof(fip), "%u.%u.%u.%u", from[0], from[1], from[2], from[3]);
-    if (!isIp4Lan(fip)) continue;
-
-    if (strcmp(fip, camIp) != 0) {
-      strncpy(camIp, fip, sizeof(camIp) - 1);
-      camIp[sizeof(camIp) - 1] = '\0';
-      prefs.putString("camip", camIp);
-      resultHttpClose();
-      streamStop();
-      Serial.printf("[DISC] SCAN tu IP moi -> cap nhat camera: %s\n", camIp);
-    }
-
-    lastScanNotifyMs = millis();
-    if (on) {
-      if (!scanning) startScan("udp");
-    } else if (scanning) {
-      endScan("udp");
-    }
-  }
-}
-
-
-// ============================== WIFI ======================================
+// ============================== WIFI ========================================
 static bool wifiConnect(uint32_t timeoutMs) {
   if (WiFi.status() == WL_CONNECTED) return true;
 
@@ -1117,11 +974,151 @@ static bool wifiConnect(uint32_t timeoutMs) {
     return false;
   }
   Serial.printf("[WiFi] OK - IP %s, RSSI %d dBm\n",
-                WiFi.localIP().toString().c_str(), (int)WiFi.RSSI());
+                WiFi.localIP().toString().c_str(), WiFi.RSSI());
   return true;
 }
 
-// ============================== TOUCH ======================================
+// ============================== SERIAL / LENH ===============================
+static char rxLine[48];
+static size_t rxLen = 0;
+
+static void printStats() {
+  Serial.printf("[STATS] fw=%s ip=%s wifi=%d dBm heap=%u\n",
+                FW_VERSION, camIp, (int)WiFi.RSSI(), ESP.getFreeHeap());
+  Serial.printf("[STATS] stream=%d fps=%u frame=%u B decode=%u ms\n",
+                (int)ss, (unsigned)fps, (unsigned)lastFrameBytes,
+                (unsigned)lastDecodeMs);
+  Serial.printf("[STATS] scanning=%d paused=%d jpegCap=%u\n",
+                (int)scanning, (int)manualPaused, (unsigned)jpegCap);
+}
+
+static void handleSerialLine(char *line) {
+  while (*line == ' ') line++;
+  if (!*line) return;
+
+  if (!strcmp(line, "/help") || !strcmp(line, "help")) {
+    Serial.println("Lenh:");
+    Serial.println("  /ip                 xem IP camera");
+    Serial.println("  /ip <ip>            dat IP camera (luu NVS)");
+    Serial.println("  /find               tim camera qua UDP 4321");
+    Serial.println("  /live on|off        bat/tat xem truc tiep");
+    Serial.println("  /test               chay lai self-test man hinh");
+    Serial.println("  /rot 0..7           doi rotation (mac dinh 2 = landscape 320x240)");
+    Serial.println("  /touch              bat/tat in toa do cam ung");
+    Serial.println("  /stats              thong so stream / heap / fps");
+    Serial.println("  /reboot             khoi dong lai");
+    return;
+  }
+
+  if (!strcmp(line, "/ip")) {
+    Serial.printf("[CFG] IP cam: %s\n", camIp);
+    return;
+  }
+
+  if (strncmp(line, "/ip ", 4) == 0) {
+    char *ip = line + 4;
+    while (*ip == ' ') ip++;
+    if (isIp4Lan(ip)) {
+      strncpy(camIp, ip, sizeof(camIp) - 1);
+      camIp[sizeof(camIp) - 1] = '\0';
+      prefs.putString("camip", camIp);
+      resultHttpClose();
+      streamStop();
+      Serial.printf("[CFG] Dat IP cam: %s\n", camIp);
+    } else {
+      Serial.println("[CFG] IP khong hop le");
+    }
+    return;
+  }
+
+  if (!strcmp(line, "/find")) {
+    Serial.println("[DISC] Tim camera qua UDP...");
+    if (udpReady) discoverCam(1500);
+    return;
+  }
+
+  if (!strcmp(line, "/test")) {
+    Serial.println("[TFT] Chay self-test man hinh...");
+    drawSelfTest();
+    lastFrameValid = false;
+    if (!scanning) {
+      drawStandbyPage();
+      standbyShown = true;
+    }
+    return;
+  }
+
+  if (strncmp(line, "/rot", 4) == 0 &&
+      (line[4] == '\0' || line[4] == ' ' || line[4] == '\t')) {
+    int r = atoi(line + 4);
+    applyRotation((uint8_t)r);
+    tft.fillScreen(TFT_BLACK);
+    lastFrameValid = false;
+    if (!scanning) {
+      char b[40];
+      snprintf(b, sizeof(b), "rot %u: %dx%d", (unsigned)g_rotation,
+               tft.width(), tft.height());
+      drawStatusPage("XOAY MAN HINH", b, TFT_CYAN);
+    }
+    return;
+  }
+
+  if (!strncmp(line, "/live", 5)) {
+    char *arg = line + 5;
+    while (*arg == ' ') arg++;
+    if (!strcmp(arg, "on")) {
+      manualPaused = false;
+      idleDirty = true;
+      standbyShown = false;
+      lastRetry = 0;
+      Serial.println("[UI] Bat lai xem truc tiep");
+    } else if (!strcmp(arg, "off")) {
+      manualPaused = true;
+      streamStop();
+      ss = SS_OFF;
+      idleDirty = true;
+      Serial.println("[UI] Tam dung xem truc tiep");
+    } else {
+      Serial.println("[UI] Dung: /live on|off");
+    }
+    return;
+  }
+
+  if (!strcmp(line, "/touch")) {
+    Serial.println("[TOUCH] Debug cam ung da bat/tat");
+    return;
+  }
+
+  if (!strcmp(line, "/stats")) {
+    printStats();
+    return;
+  }
+
+  if (!strcmp(line, "/reboot")) {
+    Serial.println("[SYS] Reboot...");
+    delay(100);
+    ESP.restart();
+    return;
+  }
+
+  Serial.printf("[LENH] Khong ro: %s\n", line);
+}
+
+static void serialPoll() {
+  while (Serial.available()) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (rxLen > 0) {
+        rxLine[rxLen] = '\0';
+        handleSerialLine(rxLine);
+        rxLen = 0;
+      }
+    } else if (rxLen < sizeof(rxLine) - 1) {
+      rxLine[rxLen++] = c;
+    }
+  }
+}
+
 static void touchPoll() {
   static uint32_t lastTap = 0;
   if (!touch.touched()) return;
@@ -1131,14 +1128,10 @@ static void touchPoll() {
   touch.readData(&rx, &ry, &rz);
   if (rz == 0) return;
 
-  // setRotation(1) cua XPT2046 da tra raw theo truc vat ly, nen o day chi
-  // con doi truc / dao dau theo tung bien the board (xem TOUCH_* o dau file).
   uint16_t mx = rx;
   uint16_t my = ry;
 #if TOUCH_SWAP_XY
-  uint16_t tmp = mx;
-  mx = my;
-  my = tmp;
+  uint16_t tmp = mx; mx = my; my = tmp;
 #endif
   long x = map((long)mx, TOUCH_X_MIN, TOUCH_X_MAX, 0, LCD_W - 1);
   long y = map((long)my, TOUCH_Y_MIN, TOUCH_Y_MAX, 0, LCD_H - 1);
@@ -1150,11 +1143,6 @@ static void touchPoll() {
 #endif
   x = constrain(x, 0, LCD_W - 1);
   y = constrain(y, 0, LCD_H - 1);
-
-  if (touchDebug) {
-    Serial.printf("[TOUCH] raw X=%u Y=%u Z=%u -> %ld,%ld\n",
-                  rx, ry, rz, x, y);
-  }
 
   uint32_t now = millis();
   if (now - lastTap < 350) return;
@@ -1170,8 +1158,7 @@ static void touchPoll() {
       Serial.println("[UI] Tam dung xem truc tiep");
     } else {
       lastRetry = 0;
-      standbyShown = false;   // ve lai trang cho / mo stream neu dang quet
-      idleDirty = true;
+      standbyShown = false;
       Serial.println("[UI] Bat lai xem truc tiep");
     }
     if (manualPaused) drawIdlePage();
@@ -1180,181 +1167,36 @@ static void touchPoll() {
   lastTap = now;
 }
 
-// ============================== SERIAL =====================================
-static char rxLine[48];
-static size_t rxLen = 0;
-
-static void printStats() {
-  Serial.printf("[STATS] fw=%s ip=%s wifi=%d dBm heap=%u maxblk=%u\n",
-                FW_VERSION, camIp, (int)WiFi.RSSI(), ESP.getFreeHeap(),
-                (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-  Serial.printf("[STATS] stream=%d chunked=%d fps=%u frame=%u B decode=%u ms\n",
-                (int)ss, (int)streamChunked, (unsigned)fps,
-                (unsigned)lastFrameBytes, (unsigned)lastDecodeMs);
-  Serial.printf("[STATS] scanning=%d link=%d paused=%d jpegCap=%u\n",
-                (int)scanning, (int)(scanning && !manualPaused),
-                (int)manualPaused,
-                (unsigned)jpegCap);
-}
-
-static void handleSerialLine(char *line) {
-  while (*line == ' ') line++;
-  if (!*line) return;
-
-  if (!strcmp(line, "/help") || !strcmp(line, "help")) {
-    Serial.println("Lenh:");
-    Serial.println("  /ip                 xem IP camera");
-    Serial.println("  /ip 192.168.0.101   dat IP camera (luu NVS)");
-    Serial.println("  /find               tim ESP32-CAM qua UDP 4321");
-    Serial.println("  /live [on|off]      bat/tat xem truc tiep");
-    Serial.println("  /test               chay lai self-test man hinh");
-    Serial.println("  /rot 0..7           doi rotation (mac dinh 2; 1/3 = landscape)");
-    Serial.println("  /stats              thong so");
-    Serial.println("  /touch              bat/tat debug toa do cam ung");
-    Serial.println("  /reboot");
-    return;
-  }
-  if (!strcmp(line, "/find")) {
-    Serial.println("[DISC] Dang tim ESP32-CAM...");
-    if (discoverCam(1200)) Serial.printf("[DISC] cam: %s\n", camIp);
-    return;
-  }
-  if (!strcmp(line, "/test")) {
-    Serial.println("[TFT] Chay self-test man hinh...");
-    drawSelfTest();
-    lastFrameValid = false;
-    if (ss != SS_LIVE) {
-      drawStatusPage("SELFTEST OK", "Vien kin 4 canh = panel OK", TFT_GREEN);
-    }
-    return;
-  }
-  if (strncmp(line, "/rot", 4) == 0 &&
-      (line[4] == '\0' || line[4] == ' ' || line[4] == '\t')) {
-    int r = atoi(line + 4);
-    applyRotation((uint8_t)r);             // 0..3, tu cat ve 0..7
-    tft.fillScreen(TFT_BLACK);
-    lastFrameValid = false;
-    if (ss != SS_LIVE) {
-      char b[40];
-      snprintf(b, sizeof(b), "rot %u: %dx%d", (unsigned)g_rotation,
-               tft.width(), tft.height());
-      drawStatusPage("XOAY MAN HINH", b, TFT_CYAN);
-    }
-    return;
-  }
-  if (!strcmp(line, "/stats")) { printStats(); return; }
-  if (!strcmp(line, "/touch")) {
-    touchDebug = !touchDebug;
-    Serial.printf("[TOUCH] Debug %s\n", touchDebug ? "ON" : "OFF");
-    return;
-  }
-  if (!strcmp(line, "/reboot")) {
-    Serial.println("[SYS] Reboot...");
-    delay(200);
-    ESP.restart();
-  }
-  if (!strncmp(line, "/live", 5)) {
-    const char *arg = line + 5;
-    while (*arg == ' ') arg++;
-    if (!*arg) manualPaused = !manualPaused;
-    else if (!strcmp(arg, "on")) manualPaused = false;
-    else if (!strcmp(arg, "off")) manualPaused = true;
-    else { Serial.println("[CFG] Dung: /live on | /live off"); return; }
-    idleDirty = true;
-    if (manualPaused) { streamStop(); ss = SS_OFF; }
-    else lastRetry = 0;
-    Serial.printf("[UI] Xem truc tiep: %s\n", manualPaused ? "OFF" : "ON");
-    return;
-  }
-  if (!strncmp(line, "/ip", 3)) {
-    const char *arg = line + 3;
-    while (*arg == ' ') arg++;
-    if (!*arg) {
-      Serial.printf("[CFG] IP cam: %s, stream %s\n", camIp,
-                    ss == SS_LIVE ? "LIVE" : "OFF");
-      return;
-    }
-    if (!isIp4Lan(arg)) {
-      Serial.println("[CFG] IP khong hop le (chi 10.x / 172.16-31.x / 192.168.x)");
-      return;
-    }
-    strncpy(camIp, arg, sizeof(camIp) - 1);
-    camIp[sizeof(camIp) - 1] = '\0';
-    prefs.putString("camip", camIp);
-    resultHttpClose();
-    streamStop();
-    ss = SS_RETRY;
-    lastRetry = 0;
-    lastFrameValid = false;
-    Serial.printf("[CFG] Da luu IP cam: %s\n", camIp);
-    return;
-  }
-  Serial.printf("[CFG] Khong hieu '%s' - go /help\n", line);
-}
-
-static void serialPoll() {
-  while (Serial.available()) {
-    char c = (char)Serial.read();
-    if (c == '\r') continue;
-    if (c == '\n') {
-      rxLine[rxLen] = '\0';
-      handleSerialLine(rxLine);
-      rxLen = 0;
-      continue;
-    }
-    if (rxLen < sizeof(rxLine) - 1) rxLine[rxLen++] = c;
-  }
-}
-
-// ============================== CAP PHAT RAM ==============================
-static bool allocJpegBuffer() {
-  const size_t caps[] = {
-    112 * 1024, 96 * 1024, 80 * 1024,
-    64 * 1024, 48 * 1024, 32 * 1024
-  };
-  for (size_t i = 0; i < sizeof(caps) / sizeof(caps[0]); i++) {
-    jpegBuf = (uint8_t *)malloc(caps[i]);
-    if (jpegBuf) {
-      jpegCap = caps[i];
-      Serial.printf("[RAM] JPEG buffer: %u bytes (heap %u, maxblk %u)\n",
-                    (unsigned)jpegCap, ESP.getFreeHeap(),
-                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-      return true;
-    }
-    Serial.printf("[RAM] Khong cap duoc %u bytes, thu nho...\n",
-                  (unsigned)caps[i]);
-  }
-  jpegCap = 0;
-  Serial.println("[RAM] THAT BAI: khong cap duoc bo dem JPEG");
-  return false;
-}
-
-// ============================== SETUP ======================================
+// ============================== SETUP =======================================
 void setup() {
   Serial.begin(115200);
-  delay(300);
   Serial.println();
   Serial.println("=== CYD ESP32-2432S028R - MAN HINH CAN MAT ===");
   Serial.printf("=== Firmware %s ===\n", FW_VERSION);
 
-  allocJpegBuffer();
+  // Cap bo dem JPEG
+  jpegBuf = (uint8_t *)heap_caps_malloc(112 * 1024,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+  if (!jpegBuf) jpegBuf = (uint8_t *)malloc(112 * 1024);
+  jpegCap = jpegBuf ? 112 * 1024 : 0;
+  Serial.printf("[RAM] JPEG buffer: %u bytes\n", (unsigned)jpegCap);
 
   // Backlight truoc khi init de tranh nhay trang
   pinMode(TFT_BL, OUTPUT);
   digitalWrite(TFT_BL, TFT_BACKLIGHT_ON);
 
   tft.init();
-  tft.setSwapBytes(true);                  // JPEGDEC xuat uint16 RGB565 chuan (little-endian)
-  applyRotation(2);                        // mac dinh /rot 2 (yeu cau)
+  tft.setSwapBytes(true);                  // JPEGDEC xuat RGB565 little-endian
+  applyRotation(2);                        // mac dinh /rot 2 (landscape 320x240)
 
-  // Kiem tra THAT sau khi xoay: landscape phai rong hon cao. Neu rotation 2
-  // khong ra landscape (panel/thus vien xu ly MADCTL khac), thu 0..3 va chon
-  // cai landscape dau tien -> khong bao gio de man hinh bi cat 2/3.
+  // Kiem tra THAT sau khi xoay: phai landscape (rong > cao). Neu khong,
+  // thu 0..3 va chon cai landscape dau tien.
   if (tft.width() <= tft.height()) {
     Serial.println("[TFT] CANH BAO: rotation 2 khong ra landscape -> thu 0..3");
     for (uint8_t r = 0; r < 4; r++) {
       tft.setRotation(r);
-      Serial.printf("[TFT]   thu rot %u: %dx%d\n", (unsigned)r, tft.width(), tft.height());
+      Serial.printf("[TFT]   thu rot %u: %dx%d\n", (unsigned)r,
+                    tft.width(), tft.height());
       if (tft.width() > tft.height()) { g_rotation = r; break; }
     }
     tft.setRotation(g_rotation);
@@ -1362,7 +1204,7 @@ void setup() {
                   (unsigned)g_rotation, tft.width(), tft.height());
   }
 
-  tft.fillScreen(TFT_BLACK);               // dam bao toan bo man hinh duoc xoa mau den
+  tft.fillScreen(TFT_BLACK);
   tft.setTextSize(1);
   Serial.printf("[TFT] driver ILI9341 native %dx%d -> rotation%u %dx%d (UI %dx%d)\n",
                 TFT_WIDTH, TFT_HEIGHT, (unsigned)g_rotation,
@@ -1370,6 +1212,7 @@ void setup() {
   if (tft.width() != LCD_W || tft.height() != LCD_H) {
     Serial.println("[TFT] LOI: kich thuoc sau xoay KHAC 320x240 -> man hinh se bi cat!");
   }
+
 #if CYD_SELFTEST
   Serial.println("[TFT] Self-test panel (4 mau + vien + 4 goc)...");
   drawSelfTest();
@@ -1384,7 +1227,7 @@ void setup() {
 
   drawSplash("Dang khoi dong...");
 
-  // NVS
+  // NVS: lay IP camera da luu
   prefs.begin("cyd", false);
   String saved = prefs.getString("camip", "");
   if (saved.length() && isIp4Lan(saved.c_str())) {
@@ -1400,13 +1243,14 @@ void setup() {
   } else {
     udpReady = (udp.begin(DISC_PORT) == 1);
     if (!udpReady) Serial.println("[DISC] Khong mo duoc UDP 4321");
+
     // Thu tim camera neu IP mac dinh khong dung
     if (!pollResult()) {
       Serial.println("[CAM] Chua doc duoc /result -> discovery");
       if (udpReady) discoverCam(800);
     }
+
     if (scanning) {
-      // Boot dung luc camera dang quet -> mo stream ngay
       drawStatusPage("DANG QUET", "Dang lay hinh tu camera...", TFT_ORANGE);
     } else {
       drawStandbyPage();   // nghi: khong truyen anh
@@ -1422,7 +1266,7 @@ void setup() {
   Serial.println("[SYS] San sang. Go /help de xem lenh.");
 }
 
-// ============================== LOOP ======================================
+// ============================== LOOP ========================================
 void loop() {
   uint32_t now = millis();
   serialPoll();
@@ -1451,8 +1295,12 @@ void loop() {
     lastRetry = 0;
     lastFrameValid = false;
     Serial.println("[WiFi] Da ket noi lai");
-    if (scanning) drawStatusPage("DANG QUET", "Dang lay hinh tu camera...", TFT_ORANGE);
-    else { drawStandbyPage(); standbyShown = true; }
+    if (scanning) {
+      drawStatusPage("DANG QUET", "Dang lay hinh tu camera...", TFT_ORANGE);
+    } else {
+      drawStandbyPage();
+      standbyShown = true;
+    }
   }
 
   // ---------------- Thong bao quet tu ESP32-CAM (UDP) ----------------
@@ -1473,8 +1321,8 @@ void loop() {
   }
 
   // ---------------- Stream / decode ----------------
-  // CHI truyen anh khi camera dang quet (bam nut). Khi nghi dong stream de
-  // camera khong chup frame lien tuc -> khong nong, khong ton dien.
+  // CHI truyen anh khi camera dang quet (bam nut). Khi nghI dong stream de
+  // ESP32-CAM khong chup lien tuc -> giam nhiet, tiet kiem dien.
   bool wantStream = scanning && !manualPaused;
 
   if (!wantStream) {
@@ -1491,7 +1339,8 @@ void loop() {
       // Vua quet xong: giu khung cuoi + ket qua trong RESULT_HOLD_MS,
       // sau do ve trang cho. Banner duoc ve lai de len khung dong bang.
       bool holding = scanEndMs && (now - scanEndMs < RESULT_HOLD_MS);
-      if (bannerOn && (int32_t)(now - bannerUntil) < 0) {
+      bool bannerActive = bannerOn && (int32_t)(now - bannerUntil) < 0;
+      if (bannerActive) {
         if (now - lastScanOverlayMs > 250) {
           lastScanOverlayMs = now;
           drawOverlay();
@@ -1563,4 +1412,17 @@ void loop() {
   }
 
   delay(1);
+}
+
+// Ham duoc goi o tren (drawOverlay su dung drawConnBox) - dinh nghia o day
+static void drawConnBox(const char *title, const char *sub) {
+  tft.fillRoundRect(46, 92, 228, 62, 10, TFT_BLACK);
+  tft.drawRoundRect(46, 92, 228, 62, 10, TFT_RED);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextFont(2);
+  tft.setTextColor(TFT_RED, TFT_BLACK);
+  tft.drawString(title, 160, 112, 2);
+  tft.setTextFont(1);
+  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString(sub, 160, 137, 1);
 }

@@ -8,8 +8,8 @@
 // KHONG doi TFT_WIDTH=320/TFT_HEIGHT=240: panel van la 240x320, doi kich
 // thuoc driver se sai cua so dia chi -> chi ve duoc 2/3 man hinh.
 #define ILI9341_DRIVER
-#define TFT_WIDTH  240
-#define TFT_HEIGHT 320
+#define TFT_WIDTH  320
+#define TFT_HEIGHT 240
 
 #define CYD_DISPLAY_ON_VSPI 0
 
