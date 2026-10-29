@@ -1,6 +1,6 @@
 /* ===========================================================================
  *  ESP32-2432S028R (CYD) - MAN HINH CAN MAT + KET QUA DIEM DANH
- *  Firmware: 2026-10-29-cyd5 (viet lai tu dau, sach will)
+ *  Firmware: 2026-10-29-cyd6 (giao dien da sap xep lai)
  * ===========================================================================
  *
  *  Vai tro:
@@ -20,7 +20,7 @@
  *
  *  Phan cung (xem tft_setup.h):
  *    - ILI9341 240x320 (portrait) SPI HSPI: MOSI=13, MISO=12, SCLK=14,
- *      CS=15, DC=2, RST=-1, BL=21. Man hinh NGANG 320x240 = setRotation(2).
+ *      CS=15, DC=2, RST=-1, BL=21. Man hinh NGANG 320x240 = setRotation(1).
  *    - XPT2046 (VSPI): CS=33, IRQ=36, CLK=25, MOSI=32, MISO=39
  *
  *  Thu vien can cai:
@@ -47,7 +47,7 @@
 #include <esp_heap_caps.h>
 
 // ============================== CAU HINH ====================================
-#define FW_VERSION        "2026-10-29-cyd5"
+#define FW_VERSION        "2026-10-29-cyd6"
 
 #define CYD_SELFTEST      1    // 1 = tu chay self-test luc boot (~2.5s)
 
@@ -99,8 +99,10 @@
 // ============================== DOI TUONG ===================================
 TFT_eSPI tft = TFT_eSPI();
 
-// Rotation mac dinh = 2 (landscape 320x240). Co the doi bang /rot <0..7>.
-static uint8_t g_rotation = 2;
+// Rotation mac dinh = 1 (landscape 320x240). Panel CYD la 240x320 doc, nen
+// rotation 1 hoac 3 moi ra NGANG; rotation 0/2 la DOC -> UI bi cat con 2/3.
+// Co the doi bang /rot <0..7>.
+static uint8_t g_rotation = 1;
 
 #if CYD_DISPLAY_ON_VSPI
   SPIClass touchSPI(HSPI);
@@ -186,24 +188,30 @@ static void printStats();
 static void drawConnBox(const char *title, const char *sub);
 
 // ============================== HIEN THI ====================================
-static void drawPauseButton(int x, int y) {
-  uint16_t bc = manualPaused ? TFT_DARKGREEN : 0x3186;
-  tft.fillRoundRect(x, y, 68, 20, 5, bc);
-  tft.drawRoundRect(x, y, 68, 20, 5, TFT_DARKGREY);
+static void drawCenteredFit(const char *text, int16_t x, int16_t y,
+                            int16_t maxWidth, uint8_t font,
+                            uint16_t fg, uint16_t bg) {
+  if (!text) return;
+  while (font > 1 && tft.textWidth(text, font) > maxWidth) font--;
   tft.setTextDatum(MC_DATUM);
-  tft.setTextFont(1);
-  tft.setTextColor(TFT_WHITE, bc);
-  tft.drawString(manualPaused ? "XEM" : "DUNG", x + 34, y + 10, 1);
+  tft.setTextColor(fg, bg);
+  tft.drawString(text, x, y, font);
+}
+
+static void drawPauseButton(int x, int y) {
+  const uint16_t bg = manualPaused ? TFT_DARKGREEN : 0x3186;
+  tft.fillRoundRect(x, y, 68, 22, 6, bg);
+  tft.drawRoundRect(x, y, 68, 22, 6, TFT_LIGHTGREY);
+  drawCenteredFit(manualPaused ? "TIEP TUC" : "TAM DUNG",
+                  x + 34, y + 11, 62, 1, TFT_WHITE, bg);
 }
 
 static void drawProgress() {
   uint32_t elapsed = millis() - scanStartMs;
   if (elapsed > 15000) elapsed = 15000;
-  int w = (int)((elapsed * 300UL) / 15000UL);
-  if (w < 0) w = 0;
-  if (w > 300) w = 300;
-  tft.fillRect(10, 208, 300, 5, 0x2104);
-  if (w > 0) tft.fillRect(10, 208, w, 5, TFT_ORANGE);
+  const int width = (int)((elapsed * 300UL) / 15000UL);
+  tft.fillRoundRect(10, 207, 300, 6, 3, 0x2104);
+  if (width > 0) tft.fillRoundRect(10, 207, width, 6, 3, TFT_ORANGE);
 }
 
 static char bannerName[64] = "";
@@ -214,22 +222,14 @@ static uint32_t bannerUntil = 0;
 static bool bannerOn = false;
 
 static void drawBanner() {
-  int bx = 14, by = 84, bw = 292, bh = 76;
-  tft.fillRoundRect(bx, by, bw, bh, 12, bannerBg);
-  tft.drawRoundRect(bx, by, bw, bh, 12, bannerFg);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextColor(bannerFg, bannerBg);
-  const char *name = bannerName[0] ? bannerName : "HOC SINH";
-  if (tft.textWidth(name, 4) > bw - 24) {
-    tft.drawString(name, 160, by + 26, 2);
-  } else {
-    tft.drawString(name, 160, by + 26, 4);
-  }
-  tft.setTextFont(2);
-  tft.drawString(bannerSub, 160, by + 56, 2);
+  const int x = 18, y = 78, w = 284, h = 82;
+  tft.fillRoundRect(x, y, w, h, 12, bannerBg);
+  tft.drawRoundRect(x, y, w, h, 12, bannerFg);
+  drawCenteredFit(bannerName[0] ? bannerName : "HOC SINH",
+                  LCD_W / 2, y + 29, w - 24, 4, bannerFg, bannerBg);
+  drawCenteredFit(bannerSub, LCD_W / 2, y + 60,
+                  w - 24, 2, bannerFg, bannerBg);
 }
-
-// Bien banner (luu o day de hai ham drawBanner / setBanner chia se)
 
 static void setBanner(const char *name, const char *sub,
                       uint16_t bg, uint16_t fg, uint32_t ms) {
@@ -246,113 +246,94 @@ static void setBanner(const char *name, const char *sub,
 }
 
 static void drawTopBar() {
-  tft.fillRect(0, 0, LCD_W, 24, TFT_BLACK);
+  tft.fillRect(0, 0, LCD_W, 28, C_HEADER);
 
-  uint16_t dot = TFT_RED;
-  const char *state = "OFF";
-  if (manualPaused) { dot = TFT_LIGHTGREY; state = "TAM DUNG"; }
-  else if (scanning) { dot = TFT_ORANGE; state = "DANG QUET"; }
-  else if (ss == SS_LIVE) { dot = TFT_GREEN; state = "LIVE"; }
-  else { dot = TFT_YELLOW; state = "CHO NUT"; }
+  uint16_t dot = TFT_YELLOW;
+  const char *state = "SAN SANG";
+  if (manualPaused) {
+    dot = TFT_LIGHTGREY;
+    state = "TAM DUNG";
+  } else if (scanning) {
+    dot = TFT_ORANGE;
+    state = "DANG QUET";
+  } else if (ss == SS_LIVE) {
+    dot = TFT_GREEN;
+    state = "TRUC TIEP";
+  }
 
-  tft.fillCircle(9, 12, 4, dot);
+  tft.fillCircle(10, 14, 4, dot);
   tft.setTextDatum(TL_DATUM);
-  tft.setTextFont(2);
-  tft.setTextSize(1);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString(state, 18, 4, 2);
+  tft.setTextColor(TFT_WHITE, C_HEADER);
+  tft.drawString(state, 20, 7, 2);
 
   if (scanning) {
-    tft.setTextColor(TFT_ORANGE, TFT_BLACK);
-    tft.drawString("GIU MAT YEN", 118, 4, 2);
+    drawCenteredFit("GIU MAT YEN", 170, 14, 112, 1, TFT_ORANGE, C_HEADER);
   } else {
-    tft.setTextColor(C_TEXT_DIM, TFT_BLACK);
-    tft.drawString(camIp, 82, 4, 2);
-    char b[16];
-    snprintf(b, sizeof(b), "%2u fps", (unsigned)fps);
-    tft.setTextColor(TFT_CYAN, TFT_BLACK);
-    tft.drawString(b, 188, 4, 2);
+    drawCenteredFit(camIp, 170, 14, 116, 1, C_TEXT_DIM, C_HEADER);
   }
 
-  drawPauseButton(248, 2);
+  drawPauseButton(248, 3);
 }
 
-static void drawGuide(bool showText) {
-  uint16_t c = scanning ? TFT_ORANGE : C_GUIDE;
-  int x0 = 66, y0 = 38, x1 = 254, y1 = 202, L = 24;
-  for (int i = 0; i < 2; i++) {
-    tft.drawFastHLine(x0, y0 + i, L, c);
-    tft.drawFastVLine(x0 + i, y0, L, c);
-    tft.drawFastHLine(x1 - L, y0 + i, L, c);
-    tft.drawFastVLine(x1 - i, y0, L, c);
-    tft.drawFastHLine(x0, y1 - i, L, c);
-    tft.drawFastVLine(x0 + i, y1 - L, L, c);
-    tft.drawFastHLine(x1 - L, y1 - i, L, c);
-    tft.drawFastVLine(x1 - i, y1 - L, L, c);
-  }
-  if (showText) {
-    tft.fillRect(86, 203, 148, 11, TFT_BLACK);
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextFont(1);
-    tft.setTextColor(c, TFT_BLACK);
-    tft.drawString("CAN MAT VAO KHUNG", 160, 208, 1);
+static void drawGuide() {
+  const uint16_t color = scanning ? TFT_ORANGE : C_GUIDE;
+  const int left = 58, right = 262, top = 40, bottom = 197, len = 22;
+  for (int i = 0; i < 2; ++i) {
+    tft.drawFastHLine(left, top + i, len, color);
+    tft.drawFastVLine(left + i, top, len, color);
+    tft.drawFastHLine(right - len, top + i, len, color);
+    tft.drawFastVLine(right - i, top, len, color);
+    tft.drawFastHLine(left, bottom - i, len, color);
+    tft.drawFastVLine(left + i, bottom - len, len, color);
+    tft.drawFastHLine(right - len, bottom - i, len, color);
+    tft.drawFastVLine(right - i, bottom - len, len, color);
   }
 }
 
 static void drawBottomBar() {
-  tft.fillRect(0, 216, LCD_W, 24, TFT_BLACK);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextFont(1);
-  tft.setTextColor(C_TEXT_DIM, TFT_BLACK);
-  if (scanning) {
-    tft.drawString("Dang nhan dien - giu mat yen", 8, 222, 1);
-  } else if (manualPaused) {
-    tft.drawString("Cham goc tren phai de bat camera", 8, 222, 1);
-  } else {
-    tft.drawString("Bam nut tren camera de diem danh", 8, 222, 1);
-  }
+  tft.fillRect(0, 216, LCD_W, 24, C_HEADER);
+  const char *message = scanning
+      ? "DANG NHAN DIEN  |  VUI LONG GIU MAT YEN"
+      : (manualPaused
+          ? "Cham nut TAM DUNG de tiep tuc"
+          : "Bam nut tren camera de diem danh");
+  drawCenteredFit(message, LCD_W / 2, 228, LCD_W - 16,
+                  2, C_TEXT_DIM, C_HEADER);
 }
 
 static void drawOverlay() {
   drawTopBar();
-  drawGuide(true);
+  drawGuide();
   drawBottomBar();
 
-  bool showBanner = bannerOn && (scanning ||
-                    (int32_t)(millis() - bannerUntil) < 0);
+  if (scanning) drawProgress();
+
+  const bool showBanner = bannerOn &&
+      (scanning || (int32_t)(millis() - bannerUntil) < 0);
   if (showBanner) drawBanner();
   else bannerOn = false;
-
-  if (scanning) {
-    drawProgress();
-    tft.fillRect(66, 203, 188, 2, TFT_BLACK);
-  }
 }
 
-static void drawSplash(const char *msg) {
+static void drawSplash(const char *message) {
   tft.fillScreen(C_BG);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextFont(4);
-  tft.setTextColor(TFT_CYAN, C_BG);
-  tft.drawString("MAN HINH CAN MAT", 160, 82, 4);
-  tft.setTextFont(2);
-  tft.setTextColor(TFT_LIGHTGREY, C_BG);
-  tft.drawString(msg, 160, 126, 2);
-  tft.setTextFont(1);
-  tft.setTextColor(TFT_DARKGREY, C_BG);
-  tft.drawString(FW_VERSION, 160, 220, 1);
+  drawCenteredFit("DIEM DANH KHUON MAT", LCD_W / 2, 78,
+                  LCD_W - 24, 4, TFT_CYAN, C_BG);
+  drawCenteredFit(message, LCD_W / 2, 126,
+                  LCD_W - 24, 2, TFT_LIGHTGREY, C_BG);
+  drawCenteredFit(FW_VERSION, LCD_W / 2, 218,
+                  LCD_W - 24, 1, TFT_DARKGREY, C_BG);
 }
 
-static void applyRotation(uint8_t r) {
-  g_rotation = r & 7;
+static void applyRotation(uint8_t rotation) {
+  g_rotation = rotation & 7;
   tft.setRotation(g_rotation);
   Serial.printf("[TFT] rotation %u -> %dx%d\n",
                 (unsigned)g_rotation, tft.width(), tft.height());
 }
 
 static void drawSelfTest() {
-  const uint16_t colors[4] = {TFT_RED, TFT_GREEN, TFT_BLUE, TFT_WHITE};
-  for (uint8_t i = 0; i < 4; i++) {
+  const uint16_t colors[] = {TFT_RED, TFT_GREEN, TFT_BLUE, TFT_WHITE};
+  for (uint8_t i = 0; i < 4; ++i) {
     tft.fillScreen(colors[i]);
     delay(180);
   }
@@ -362,61 +343,66 @@ static void drawSelfTest() {
   tft.drawRect(1, 1, LCD_W - 2, LCD_H - 2, TFT_WHITE);
 
   tft.setTextFont(1);
-  tft.setTextSize(1);
+  tft.setTextDatum(TL_DATUM);
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.setTextDatum(TL_DATUM); tft.drawString("0,0", 4, 4, 1);
-  tft.setTextDatum(TR_DATUM); tft.drawString("319,0", LCD_W - 4, 4, 1);
-  tft.setTextDatum(BL_DATUM); tft.drawString("0,239", 4, LCD_H - 4, 1);
-  tft.setTextDatum(BR_DATUM); tft.drawString("319,239", LCD_W - 4, LCD_H - 4, 1);
+  tft.drawString("0,0", 4, 4, 1);
+  tft.setTextDatum(TR_DATUM);
+  tft.drawString("319,0", LCD_W - 4, 4, 1);
+  tft.setTextDatum(BL_DATUM);
+  tft.drawString("0,239", 4, LCD_H - 4, 1);
+  tft.setTextDatum(BR_DATUM);
+  tft.drawString("319,239", LCD_W - 4, LCD_H - 4, 1);
 
-  char buf[32];
-  snprintf(buf, sizeof(buf), "SELFTEST %dx%d", tft.width(), tft.height());
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextFont(4);
-  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString(buf, LCD_W / 2, LCD_H / 2 - 10, 4);
-  tft.setTextFont(1);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  char line2[48];
-  snprintf(line2, sizeof(line2), "rot %u - Vien trang kin 4 canh = panel OK",
+  char label[32];
+  snprintf(label, sizeof(label), "SELF TEST %dx%d", tft.width(), tft.height());
+  drawCenteredFit(label, LCD_W / 2, LCD_H / 2 - 10,
+                  LCD_W - 24, 4, TFT_YELLOW, TFT_BLACK);
+  char rotationLabel[40];
+  snprintf(rotationLabel, sizeof(rotationLabel), "Rotation %u",
            (unsigned)g_rotation);
-  tft.drawString(line2, LCD_W / 2, LCD_H / 2 + 22, 1);
-  delay(1600);
+  drawCenteredFit(rotationLabel, LCD_W / 2, LCD_H / 2 + 24,
+                  LCD_W - 24, 1, TFT_LIGHTGREY, TFT_BLACK);
+  delay(1200);
+}
+
+static void drawHeader() {
+  tft.fillRect(0, 0, LCD_W, 32, C_HEADER);
+  tft.setTextDatum(TL_DATUM);
+  tft.setTextColor(TFT_CYAN, C_HEADER);
+  tft.drawString("DIEM DANH", 12, 8, 2);
+  drawPauseButton(248, 5);
+}
+
+static void drawFooter() {
+  tft.fillRect(0, 211, LCD_W, 29, C_HEADER);
+  char status[64];
+  const int rssi = WiFi.status() == WL_CONNECTED ? (int)WiFi.RSSI() : 0;
+  snprintf(status, sizeof(status), "CAM %s   |   WIFI %d dBm", camIp, rssi);
+  drawCenteredFit(status, LCD_W / 2, 226,
+                  LCD_W - 16, 1, C_TEXT_DIM, C_HEADER);
 }
 
 static void drawStandbyPage() {
   tft.fillScreen(C_BG);
-  tft.fillRect(0, 0, LCD_W, 30, C_HEADER);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextFont(2);
-  tft.setTextColor(TFT_CYAN, C_HEADER);
-  tft.drawString("MAN HINH CAN MAT", 10, 7, 2);
-  drawPauseButton(248, 5);
+  drawHeader();
 
-  uint16_t ic = TFT_GREEN;
-  tft.drawRoundRect(105, 54, 110, 58, 10, ic);
-  tft.drawRoundRect(106, 55, 108, 56, 9, ic);
-  tft.drawCircle(160, 83, 20, ic);
-  tft.drawCircle(160, 83, 11, ic);
-  tft.fillRect(135, 46, 24, 9, ic);
+  const uint16_t icon = TFT_GREEN;
+  tft.drawRoundRect(129, 52, 62, 48, 9, icon);
+  tft.drawCircle(160, 76, 13, icon);
+  tft.drawCircle(160, 76, 6, icon);
+  tft.fillRoundRect(139, 46, 20, 8, 3, icon);
+  tft.fillCircle(181, 60, 2, icon);
 
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextFont(4);
-  tft.setTextColor(TFT_WHITE, C_BG);
-  tft.drawString("SAN SANG DIEM DANH", 160, 144, 4);
+  drawCenteredFit("SAN SANG DIEM DANH", LCD_W / 2, 126,
+                  LCD_W - 24, 4, TFT_WHITE, C_BG);
+  drawCenteredFit("Bam nut tren ESP32-CAM", LCD_W / 2, 157,
+                  LCD_W - 32, 2, C_TEXT_DIM, C_BG);
+  drawCenteredFit("de chup anh va nhan dien", LCD_W / 2, 179,
+                  LCD_W - 32, 2, C_TEXT_DIM, C_BG);
 
-  tft.setTextFont(2);
-  tft.setTextColor(C_TEXT_DIM, C_BG);
-  tft.drawString("Bam nut tren ESP32-CAM de chup anh", 160, 176, 2);
-  tft.setTextFont(1);
-  tft.setTextColor(TFT_DARKGREY, C_BG);
-  tft.drawString("Man hinh chi nhan anh trong 15 giay quet", 160, 198, 1);
-
-  char b[64];
-  snprintf(b, sizeof(b), "Cam: %s   WiFi: %d dBm", camIp, (int)WiFi.RSSI());
-  tft.drawString(b, 160, 220, 1);
-
-  if (bannerOn) drawBanner();
+  drawFooter();
+  if (bannerOn && (int32_t)(millis() - bannerUntil) < 0) drawBanner();
+  else bannerOn = false;
 }
 
 static void drawIdlePage() {
@@ -425,29 +411,18 @@ static void drawIdlePage() {
 
 static void drawStatusPage(const char *title, const char *sub, uint16_t accent) {
   tft.fillScreen(C_BG);
-  tft.fillRect(0, 0, LCD_W, 30, C_HEADER);
-  tft.setTextDatum(TL_DATUM);
-  tft.setTextFont(2);
-  tft.setTextColor(TFT_CYAN, C_HEADER);
-  tft.drawString("MAN HINH CAN MAT", 10, 7, 2);
-  drawPauseButton(248, 5);
+  drawHeader();
 
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextFont(4);
-  tft.setTextColor(accent, C_BG);
-  tft.drawString(title, 160, 105, 4);
+  tft.fillRoundRect(24, 67, 272, 112, 12, C_HEADER);
+  tft.drawRoundRect(24, 67, 272, 112, 12, accent);
+  drawCenteredFit(title, LCD_W / 2, 108,
+                  244, 4, accent, C_HEADER);
+  drawCenteredFit(sub, LCD_W / 2, 145,
+                  244, 2, TFT_LIGHTGREY, C_HEADER);
 
-  tft.setTextFont(2);
-  tft.setTextColor(TFT_LIGHTGREY, C_BG);
-  tft.drawString(sub, 160, 146, 2);
-
-  tft.setTextFont(1);
-  tft.setTextColor(TFT_DARKGREY, C_BG);
-  char b[48];
-  snprintf(b, sizeof(b), "Cam: %s   WiFi: %d dBm", camIp, (int)WiFi.RSSI());
-  tft.drawString(b, 160, 218, 1);
-
-  if (bannerOn) drawBanner();
+  drawFooter();
+  if (bannerOn && (int32_t)(millis() - bannerUntil) < 0) drawBanner();
+  else bannerOn = false;
 }
 
 // ============================== JPEG DECODE =================================
@@ -1003,7 +978,7 @@ static void handleSerialLine(char *line) {
     Serial.println("  /find               tim camera qua UDP 4321");
     Serial.println("  /live on|off        bat/tat xem truc tiep");
     Serial.println("  /test               chay lai self-test man hinh");
-    Serial.println("  /rot 0..7           doi rotation (mac dinh 2 = landscape 320x240)");
+    Serial.println("  /rot 0..7           doi rotation (mac dinh 1 = landscape 320x240)");
     Serial.println("  /touch              bat/tat in toa do cam ung");
     Serial.println("  /stats              thong so stream / heap / fps");
     Serial.println("  /reboot             khoi dong lai");
@@ -1187,12 +1162,12 @@ void setup() {
 
   tft.init();
   tft.setSwapBytes(true);                  // JPEGDEC xuat RGB565 little-endian
-  applyRotation(2);                        // mac dinh /rot 2 (landscape 320x240)
+  applyRotation(1);                        // panel 240x320 doc -> rot 1 = ngang 320x240
 
   // Kiem tra THAT sau khi xoay: phai landscape (rong > cao). Neu khong,
-  // thu 0..3 va chon cai landscape dau tien.
+  // thu 0..3 va chon cai landscape dau tien (1 hoac 3).
   if (tft.width() <= tft.height()) {
-    Serial.println("[TFT] CANH BAO: rotation 2 khong ra landscape -> thu 0..3");
+    Serial.println("[TFT] CANH BAO: rot 1 khong ra landscape -> thu 0..3");
     for (uint8_t r = 0; r < 4; r++) {
       tft.setRotation(r);
       Serial.printf("[TFT]   thu rot %u: %dx%d\n", (unsigned)r,
@@ -1206,7 +1181,12 @@ void setup() {
 
   tft.fillScreen(TFT_BLACK);
   tft.setTextSize(1);
-  Serial.printf("[TFT] driver ILI9341 native %dx%d -> rotation%u %dx%d (UI %dx%d)\n",
+  Serial.printf("[TFT] driver %s native %dx%d -> rotation%u %dx%d (UI %dx%d)\n",
+#if CYD_PANEL_ST7789
+                "ST7789",
+#else
+                "ILI9341",
+#endif
                 TFT_WIDTH, TFT_HEIGHT, (unsigned)g_rotation,
                 tft.width(), tft.height(), LCD_W, LCD_H);
   if (tft.width() != LCD_W || tft.height() != LCD_H) {
@@ -1414,15 +1394,10 @@ void loop() {
   delay(1);
 }
 
-// Ham duoc goi o tren (drawOverlay su dung drawConnBox) - dinh nghia o day
+// Draw a compact connection warning over the last camera frame.
 static void drawConnBox(const char *title, const char *sub) {
-  tft.fillRoundRect(46, 92, 228, 62, 10, TFT_BLACK);
-  tft.drawRoundRect(46, 92, 228, 62, 10, TFT_RED);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextFont(2);
-  tft.setTextColor(TFT_RED, TFT_BLACK);
-  tft.drawString(title, 160, 112, 2);
-  tft.setTextFont(1);
-  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString(sub, 160, 137, 1);
+  tft.fillRoundRect(24, 78, 272, 86, 12, TFT_BLACK);
+  tft.drawRoundRect(24, 78, 272, 86, 12, TFT_RED);
+  drawCenteredFit(title, LCD_W / 2, 109, 244, 2, TFT_RED, TFT_BLACK);
+  drawCenteredFit(sub, LCD_W / 2, 138, 244, 1, TFT_LIGHTGREY, TFT_BLACK);
 }
