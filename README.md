@@ -497,6 +497,36 @@ proxy `/api/esp32/live`.
 > `CameraWebServer_copy_*/CameraWebServer.ino` bằng **Arduino IDE**, cài board
 > ESP32 + chọn `AI Thinker ESP32-CAM`, sửa `ssid`/`password`/`PUSH_URL` rồi nạp.
 
+### Tự tìm IP server (UDP discovery — `DISCOVERY_ENABLE = 1`)
+
+IP máy chạy server đổi theo DHCP thì `PUSH_URL` ghi cứng trong NVS sẽ trỏ sai.
+Firmware tự dò lại qua UDP cổng `4321` (`discovery.py` phía server):
+
+1. Lúc boot, ESP32-CAM gửi `FACESYNC|DISCOVER|<mode>` **5 lần × 600 ms**
+   (broadcast `255.255.255.255` **và** broadcast subnet `x.x.x.255`).
+2. Server trả lời unicast `FACESYNC|SERVER|http://<ip>:<CAMERA_PORT>/api/esp32/frame`
+   và broadcast lại. ESP32 nhận URL **hợp lệ** (host là IP LAN RFC1918) thì lưu NVS.
+3. Khi đang offline, ESP32 hỏi lại mỗi 5 s; mỗi 15 s gửi
+   `FACESYNC|ESP32|<ip>|<mode>` để server biết IP camera.
+4. Server cũng broadcast URL mỗi ~5 s (để camera tự sửa khi IP server đổi), và
+   unicast trực tiếp tới IP camera gần nhất (router chặn broadcast vẫn tới được).
+
+Kiểm tra trên Serial Monitor (115200):
+
+```text
+[DISC] DISCOVERY_ENABLE=1 (tu tim IP server qua UDP 4321)
+[CFG] URL server dang luu: http://192.168.0.50:5001/api/esp32/frame
+[DISC] Da nghe server. URL dung: http://192.168.0.50:5001/api/esp32/frame
+```
+
+- **Không thấy `[DISC] Da nghe server`** → server và camera khác subnet, firewall
+  chặn UDP 4321, hoặc nạp nhầm bản `noDISC` (bản này **không có** discovery —
+  `flash_esp32.bat COMx noDISC`). Thử `/disc` trên Serial để hỏi lại ngay.
+- Server có nhiều card mạng/VPN: đặt `DISCOVERY_URL` trong `.env` (xem
+  `.env.example`) để quảng bá đúng IP LAN.
+- Nếu server tự quảng bá `127.0.0.1`/APIPA (169.254.x), ESP32 sẽ **bỏ qua** —
+  kiểm tra log server `[discovery] quang ba server: ...`.
+
 ## 9. Kiểm thử & đo ngưỡng
 
 ```bat
@@ -578,3 +608,7 @@ nhan-dien-khuon-mat-main/
 | Tên hiện chậm | Giảm `TRACK_CONFIRM` (3 → 2) |
 | Ô vuông nhảy / mất khi chớp sáng | Tăng `TRACK_MAX_AGE`, giảm `TRACK_SMOOTH`; hoặc `TRACK_BACKEND = csrt` |
 | Chậm | Giảm `PROCESS_FPS`, giảm độ phân giải preview (512–640 px là đủ) |
+| ESP32-CAM không tự tìm thấy server (`Chua nghe thay server nao`) | (1) Server/camera **khác subnet** — broadcast không qua router; đưa về cùng LAN hoặc đặt `DISCOVERY_URL=http://<ip-lan>:5001`. (2) Firewall chưa mở **UDP 4321** chiều vào. (3) Nạp nhầm bản `noDISC` — nạp lại `flash_esp32.bat COMx` (không có `noDISC`). (4) Serial gõ `/disc` để hỏi lại, `/url` để xem URL đang lưu |
+| Server log `[discovery] quang ba server: http://127.0.0.1...` | Máy chủ chọn sai card mạng. Đặt `DISCOVERY_URL` = IP LAN thật trong `.env` rồi khởi động lại server |
+| CYD chỉ hiện **2/3 màn hình** hoặc có sọc ngang | Panel là **ILI9341 240×320 portrait**; landscape 320×240 chỉ đạt bằng `tft.setRotation(1)` với `TFT_WIDTH 240`/`TFT_HEIGHT 320`. Đặt `TFT_WIDTH 320`/`TFT_HEIGHT 240` sẽ sai cửa sổ địa chỉ → 2/3 màn hình. Chạy `/test` trên Serial: **viền trắng kín 4 cạnh + đủ 4 nhãn góc** = panel/driver OK; sọc còn lại nằm trong ảnh camera (JPEG) chứ không phải panel |
+| CYD boot chậm ~2,5 s | Self-test màn hình (`CYD_SELFTEST 1`). Đổi thành `0` trong `esp32cyd.ino` khi đã xác nhận panel tốt |

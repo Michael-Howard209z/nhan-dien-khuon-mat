@@ -3,7 +3,10 @@
 
 #define USER_SETUP_LOADED
 
-// Native landscape 320x240 — KHONG xoay (rotation 0) de tranh tearing
+// CYD 2.8" = ILI9341 240x320 PORTRAIT.
+// Man hinh NGANG 320x240 dat duoc bang tft.setRotation(1) trong sketch.
+// KHONG doi TFT_WIDTH=320/TFT_HEIGHT=240: panel van la 240x320, doi kich
+// thuoc driver se sai cua so dia chi -> chi ve duoc 2/3 man hinh.
 #define ILI9341_DRIVER
 #define TFT_WIDTH  240
 #define TFT_HEIGHT 320

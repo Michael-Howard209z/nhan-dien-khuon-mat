@@ -180,6 +180,7 @@ static uint32_t g_last_hb_ok_ms = 0;   // lan heartbeat thanh cong gan nhat
 #define DISC_MIN_GAP_MS 5000    // it nhat 5s moi lan gui DISCOVER khi offline
 static WiFiUDP g_discUdp;
 static bool g_discOn = false;
+static bool g_discHeard = false;      // da nghe duoc URL server trong dot burst
 static uint32_t g_discLastSend = 0;   // lan GUI di (DISCOVER/ANNOUNCE) gan nhat
 static uint32_t g_discLastInfo = 0;   // lan gui "minh la ESP32 nao" cho server
 
@@ -204,9 +205,23 @@ static void discSend(const char *payload) {
   uint32_t now = millis();
   if (g_discLastSend && (now - g_discLastSend) < DISC_MIN_GAP_MS) return;  // han che do nhieu
   g_discLastSend = now;
-  if (g_discUdp.beginPacket("255.255.255.255", DISC_PORT)) {   // broadcast toan mang
+
+  // 1) Broadcast toan mang (255.255.255.255)
+  if (g_discUdp.beginPacket(IPAddress(255, 255, 255, 255), DISC_PORT)) {
     g_discUdp.print(payload);
     g_discUdp.endPacket();
+  }
+
+  // 2) Broadcast theo subnet (x.x.x.255). Nhieu router/AP chan
+  //    255.255.255.255 nhung van forward dia chi broadcast cua subnet.
+  IPAddress ip = WiFi.localIP();
+  IPAddress mask = WiFi.subnetMask();
+  if ((uint32_t)ip != 0 && mask[0] == 255 && mask[1] == 255 && mask[2] == 255) {
+    IPAddress bc(ip[0], ip[1], ip[2], 255);
+    if (g_discUdp.beginPacket(bc, DISC_PORT)) {
+      g_discUdp.print(payload);
+      g_discUdp.endPacket();
+    }
   }
 }
 
@@ -290,7 +305,14 @@ static void discOnServerUrl(const char *url) {
     url = fixed;
   }
 
-  if (strcmp(url, cfg.push_url) == 0) return;         // khong doi gi
+  // Da nghe duoc mot URL server hop le (du URL nay trung URL dang dung).
+  // Co bien nay de log boot KHONG bao nham "chua nghe thay server nao".
+  g_discHeard = true;
+
+  if (strcmp(url, cfg.push_url) == 0) {
+    Serial.printf("[DISC] Nghe server: %s (dang dung dung URL nay)\n", url);
+    return;                                            // khong doi gi
+  }
 
   // Chi doi khi dang mat ket noi (khong lam gian doan phien dang chay tot).
   // "Chua tung online" (g_last_heartbeat_ms==0) van cho phep -> chay tot tu boot.
@@ -374,15 +396,13 @@ static bool discBootBurst() {
   if (!g_discOn || WiFi.status() != WL_CONNECTED) return false;
   char msg[96];
   snprintf(msg, sizeof(msg), DISC_MAGIC "|DISCOVER|%s", discModeName());
-  for (int i = 0; i < 3; i++) {
+  g_discHeard = false;
+  for (int i = 0; i < 5; i++) {          // 5 lan x ~600ms = ~3s
     discSendNow(msg);
-    char before[sizeof(cfg.push_url)];
-    strncpy(before, cfg.push_url, sizeof(before) - 1);   // ban sao DE SO SANH
-    before[sizeof(before) - 1] = '\0';
     uint32_t t0 = millis();
-    while (millis() - t0 < 700) {        // cho server tra loi 700ms
+    while (millis() - t0 < 600) {        // cho server tra loi 600ms
       discRx();
-      if (strcmp(cfg.push_url, before) != 0) return true;   // da doi URL
+      if (g_discHeard) return true;      // nghe duoc server (URL doi hay khong)
       delay(5);
     }
   }
@@ -2223,11 +2243,19 @@ void setup() {
   //  TU TIM IP SERVER (UDP broadcast) 
   // Server Python (discovery.py) moi 5s gui "FACESYNC|SERVER|http://ip:5001" ra
   // cong 4321. Neu IP server doi (DHCP) thi o day tu cap nhat url trong NVS.
+#if DISCOVERY_ENABLE
+  Serial.println("[DISC] DISCOVERY_ENABLE=1 (tu tim IP server qua UDP 4321)");
+#else
+  Serial.println("[DISC] DISCOVERY_ENABLE=0 (BAN NAY KHONG CO TU TIM SERVER!)");
+#endif
+  Serial.printf("[CFG] URL server dang luu: %s\n",
+                cfg.push_url[0] ? cfg.push_url : PUSH_URL);
   discBegin();
   if (discBootBurst()) {
-    Serial.printf("[DISC] Da dung dung URL server tu luc boot: %s\n", cfg.push_url);
+    Serial.printf("[DISC] Da nghe server. URL dung: %s\n", cfg.push_url);
   } else {
-    Serial.println("[DISC] Chua nghe thay server nao (se hoi lai khi offline)");
+    Serial.println("[DISC] Chua nghe thay server nao -> se hoi lai moi 5s khi offline");
+    Serial.println("[DISC] Kiem tra: server cung subnet? UDP 4321 mo? go /disc de thu lai");
   }
   discInfoPoll();   // gui ngay 1 goi "minh la ESP32 nay" -> server biet ip camera
 

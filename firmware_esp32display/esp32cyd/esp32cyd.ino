@@ -47,7 +47,11 @@
 #include <esp_heap_caps.h>
 
 // ============================== CAU HINH ====================================
-#define FW_VERSION        "2026-10-28-cyd1"
+#define FW_VERSION        "2026-10-29-cyd2"
+
+// 1 = tu chay self-test mau/vien luc boot (~2.5s) de kiem tra panel/doc lap
+// voi camera. Sau khi da xac nhan man hinh tot, doi thanh 0 cho boot nhanh.
+#define CYD_SELFTEST      1
 
 #define WIFI_SSID         "Test"
 #define WIFI_PASS         "88888888"
@@ -436,6 +440,42 @@ static void drawSplash(const char *msg) {
   tft.drawString(FW_VERSION, 160, 220, 1);
 }
 
+// Self-test panel doc lap voi camera/JPEG:
+//   - 4 mau dac full man hinh (do/xanh la/xanh duong/trang)
+//   - vien trang kin 4 canh + nhan toa do 4 goc
+// Neu vien kin, 4 goc hien du va mau sach => driver + panel + SPI OK.
+// Neu chi thay 2/3 man hinh / thieu goc => loi cau hinh driver/huong man hinh.
+static void drawSelfTest() {
+  const uint16_t colors[4] = {TFT_RED, TFT_GREEN, TFT_BLUE, TFT_WHITE};
+  for (uint8_t i = 0; i < 4; i++) {
+    tft.fillScreen(colors[i]);
+    delay(180);
+  }
+
+  tft.fillScreen(TFT_BLACK);
+  tft.drawRect(0, 0, LCD_W, LCD_H, TFT_WHITE);
+  tft.drawRect(1, 1, LCD_W - 2, LCD_H - 2, TFT_WHITE);
+
+  tft.setTextFont(1);
+  tft.setTextSize(1);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.setTextDatum(TL_DATUM); tft.drawString("0,0", 4, 4, 1);
+  tft.setTextDatum(TR_DATUM); tft.drawString("319,0", LCD_W - 4, 4, 1);
+  tft.setTextDatum(BL_DATUM); tft.drawString("0,239", 4, LCD_H - 4, 1);
+  tft.setTextDatum(BR_DATUM); tft.drawString("319,239", LCD_W - 4, LCD_H - 4, 1);
+
+  char buf[32];
+  snprintf(buf, sizeof(buf), "SELFTEST %dx%d", tft.width(), tft.height());
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextFont(4);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  tft.drawString(buf, LCD_W / 2, LCD_H / 2 - 10, 4);
+  tft.setTextFont(1);
+  tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
+  tft.drawString("Vien trang kin 4 canh = panel OK", LCD_W / 2, LCD_H / 2 + 22, 1);
+  delay(1600);
+}
+
 static void drawStatusPage(const char *title, const char *sub, uint16_t accent) {
   tft.fillScreen(C_BG);
   tft.fillRect(0, 0, LCD_W, 30, C_HEADER);
@@ -722,12 +762,29 @@ static int readFrame(size_t *outLen) {
       if (prev == 0xFF && b == 0xD8) {          // SOI
         in = true;
         n = 0;
+        overflow = false;
         if (jpegCap >= 2) {
           jpegBuf[n++] = 0xFF;
           jpegBuf[n++] = 0xD8;
         } else {
           overflow = true;
         }
+      }
+      prev = b;
+      continue;
+    }
+
+    // Gap SOI moi khi CHUA thay EOI => frame truoc bi cat giua chung (camera
+    // treo / rot mang). Neu copy tiep, 2 nua frame dinh vao nhau tao JPEG
+    // hong -> man hinh hien nhieu vach ngang. Bo phan cu, bat dau lai.
+    if (prev == 0xFF && b == 0xD8) {
+      n = 0;
+      overflow = false;
+      if (jpegCap >= 2) {
+        jpegBuf[n++] = 0xFF;
+        jpegBuf[n++] = 0xD8;
+      } else {
+        overflow = true;
       }
       prev = b;
       continue;
@@ -1009,6 +1066,7 @@ static void handleSerialLine(char *line) {
     Serial.println("  /ip 192.168.0.101   dat IP camera (luu NVS)");
     Serial.println("  /find               tim ESP32-CAM qua UDP 4321");
     Serial.println("  /live [on|off]      bat/tat xem truc tiep");
+    Serial.println("  /test               chay lai self-test man hinh");
     Serial.println("  /stats              thong so");
     Serial.println("  /touch              bat/tat debug toa do cam ung");
     Serial.println("  /reboot");
@@ -1017,6 +1075,15 @@ static void handleSerialLine(char *line) {
   if (!strcmp(line, "/find")) {
     Serial.println("[DISC] Dang tim ESP32-CAM...");
     if (discoverCam(1200)) Serial.printf("[DISC] cam: %s\n", camIp);
+    return;
+  }
+  if (!strcmp(line, "/test")) {
+    Serial.println("[TFT] Chay self-test man hinh...");
+    drawSelfTest();
+    lastFrameValid = false;
+    if (ss != SS_LIVE) {
+      drawStatusPage("SELFTEST OK", "Vien kin 4 canh = panel OK", TFT_GREEN);
+    }
     return;
   }
   if (!strcmp(line, "/stats")) { printStats(); return; }
@@ -1125,8 +1192,13 @@ void setup() {
   tft.setSwapBytes(true);                  // JPEGDEC xuat uint16 RGB565 chuan (little-endian)
   tft.fillScreen(TFT_BLACK);               // dam bao toan bo man hinh duoc xoa mau den
   tft.setTextSize(1);
-  Serial.printf("[TFT] init %dx%d -> rotation1 width=%d height=%d\n",
+  Serial.printf("[TFT] driver ILI9341, native %dx%d portrait -> rotation1 %dx%d\n",
                 TFT_WIDTH, TFT_HEIGHT, tft.width(), tft.height());
+#if CYD_SELFTEST
+  Serial.println("[TFT] Self-test panel (4 mau + vien + 4 goc)...");
+  drawSelfTest();
+  tft.fillScreen(TFT_BLACK);
+#endif
 
   // Cam ung tren bus SPI rieng
   touchSPI.begin(TOUCH_SCLK_PIN, TOUCH_MISO_PIN, TOUCH_MOSI_PIN, TOUCH_CS_PIN);

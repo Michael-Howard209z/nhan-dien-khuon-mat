@@ -23,6 +23,7 @@ chỉ mất phần "server tự biết IP camera trước khi ESP32 kết nối 
 
 from __future__ import annotations
 
+import os
 import socket
 import threading
 import time
@@ -133,10 +134,16 @@ class DiscoveryService:
     """Luồng nền: broadcast tên server + trả lời câu hỏi DISCOVER + nghe ESP32."""
 
     def __init__(self, camera_port: int, on_camera=None,
-                 announce_every: float = _ANNOUNCE_EVERY) -> None:
+                 announce_every: float = _ANNOUNCE_EVERY,
+                 public_url: str | None = None) -> None:
         self._camera_port = camera_port
         self._on_camera = on_camera          # callback(ip: str, mode: str)
         self._announce_every = max(1.0, float(announce_every))
+        # URL quang ba co dinh (neu may chu co nhieu card mang / sau NAT).
+        # Vi du trong .env: DISCOVERY_URL=http://192.168.0.50:5001
+        if public_url is None:
+            public_url = os.getenv("DISCOVERY_URL") or ""
+        self._public_url = public_url.strip().rstrip("/")
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._sock: socket.socket | None = None
@@ -194,16 +201,21 @@ class DiscoveryService:
         self._broadcast(self._server_url())
 
     #bên trong 
-    def _server_url(self) -> str | None:
+    def _server_url(self, peer_ip: str | None = None) -> str | None:
         # GUI DAY DU endpoint (khong chi host:port): ESP32 dung truc tiep lam
         # push_url. Neu chi gui "http://ip:5001" thi khi nhan vao NVS se MAT
         # duong dan "/api/esp32/frame" -> POST anh loi 404 (heartbeat van chay
         # vi heartbeatPoll dung path co dinh).
         #
+        # peer_ip = IP camera vua gui goi tin. Phai truyen vao de ham chon
+        # DUNG interface phia camera (may co nhieu card mang/VPN).
+        #
         # Tra ve None neu khong xac dinh duoc IP LAN -> PHAI khong gui gi ca.
         # Gui mot URL sai (127.0.0.1, APIPA...) anh huong TOAN CAU vi ESP32 LUU
         # no vao NVS va se khong doi lai khi van "online".
-        ip = local_ip_for(self._last_camera_ip)
+        if self._public_url:
+            return self._public_url
+        ip = local_ip_for(peer_ip or self._last_camera_ip)
         if not ip:
             return None
         return f"http://{ip}:{self._camera_port}/api/esp32/frame"
@@ -214,12 +226,25 @@ class DiscoveryService:
         sock = self._sock
         if not sock:
             return
+        # Cho phep truyen vao URL tran ("http://...") hoac ca goi tin day du.
+        # Truoc day _handle()/announce_now() truyen URL tran -> broadcast ra
+        # thieu "FACESYNC|SERVER|" nen ESP32 bo qua.
+        if not payload.startswith(PROTO + "|"):
+            payload = f"{PROTO}|SERVER|{payload}"
         data = payload.encode("utf-8", "replace")
         targets = ["255.255.255.255"]
         sub = self._subnet_broadcast(self._last_camera_ip)
         if sub:
             targets.append(sub)
+        # Unicast thang toi camera da biet IP: khong phu thuoc router co
+        # forward broadcast hay khong (nhieu AP bat "client isolation").
+        if self._last_camera_ip and _is_lan_ipv4(self._last_camera_ip):
+            targets.append(self._last_camera_ip)
+        seen = set()
         for target in targets:
+            if target in seen:
+                continue
+            seen.add(target)
             try:
                 sock.sendto(data, (target, DISC_PORT))
             except OSError:
@@ -245,15 +270,17 @@ class DiscoveryService:
 
         if kind == "DISCOVER":
             # ESP32 hoi "ai la server?" -> tra loi truc tiep + broadcast lai.
-            url = self._server_url()
-            _log(f"ESP32 hoi (mode={fields[2] if len(fields) > 2 else '?'} "
-                 f"tu {ip}) -> tra loi {url}")
+            mode = fields[2] if len(fields) > 2 else ""
+            # Ghi nho camera TRUOC khi tinh URL: local_ip_for() se chon dung
+            # interface phia camera (may chu co VPN/nhieu card mang).
+            self._note_camera(ip, mode)
+            url = self._server_url(ip)
+            _log(f"ESP32 hoi (mode={mode or '?'} tu {ip}) -> tra loi {url}")
             if not url:
                 # Khong xac dinh duoc IP LAN -> KHONG tra loi. Tra loi mot URL
                 # sai se lam ESP32 luu vao NVS va POST anh vao chu no.
                 _log("khong xac dinh duoc IP LAN -> khong tra loi (neu van loi "
                      "hien `ip a`, khong cho DNS/hostname ra 127.0.0.1)")
-                self._note_camera(ip, fields[2] if len(fields) > 2 else "")
                 return
             try:
                 if self._sock:
@@ -262,12 +289,13 @@ class DiscoveryService:
             except OSError:
                 pass
             self._broadcast(url)
-            self._note_camera(ip, fields[2] if len(fields) > 2 else "")
 
         elif kind == "ESP32":
             cam_ip = fields[2] if len(fields) > 2 and fields[2] else ip
             mode = fields[3] if len(fields) > 3 else ""
             self._note_camera(cam_ip, mode)
+            # Camera vua bao danh -> gui ngay URL dung (khong doi 5s).
+            self.announce_now()
 
     def _note_camera(self, ip: str, mode: str) -> None:
         # Chi chap nhan IPv4 dải LAN that (10/8, 172.16/12, 192.168/16) - khong
@@ -288,6 +316,7 @@ class DiscoveryService:
 
     def _run(self) -> None:
         last_announce = 0.0
+        last_url_logged: str | None = None
         while not self._stop.is_set():
             now = time.time()
             if now - last_announce >= self._announce_every:
@@ -295,6 +324,9 @@ class DiscoveryService:
                 try:
                     url = self._server_url()  # None = khong xac dinh duoc IP LAN
                     if url:
+                        if url != last_url_logged:
+                            _log(f"quang ba server: {url}")
+                            last_url_logged = url
                         self._broadcast(f"{PROTO}|SERVER|{url}")
                 except Exception as exc:  # noqa: BLE001 - thread nen khong duoc chet
                     _log(f"loi broadcast (giu chay tiep): {exc!r}")

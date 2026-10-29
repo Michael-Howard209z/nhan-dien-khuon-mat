@@ -134,6 +134,7 @@ Lenh Serial:
 | `/ip 192.168.0.101` | Dat IP camera (luu NVS) |
 | `/find` | Tim camera qua UDP 4321 |
 | `/live on` / `/live off` | Bat/tat xem truc tiep |
+| `/test` | Chay lai self-test man hinh (4 mau + vien + 4 goc) |
 | `/touch` | Bat/tat in toa do cam ung (hieu chuan) |
 | `/stats` | fps, kich thuoc frame, thoi gian decode, heap |
 | `/reboot` | Khoi dong lai |
@@ -180,6 +181,9 @@ Cach chon nhanh: cham goc **tren-trai**. Toa do in ra phai gan `(0,0)`.
 | `KET NOI` mai | Camera dang bi client khac chiem (mo nhieu tab `/stream`). Dong bot tab. |
 | Cham nut khong an | Chay `/touch` de kiem tra toa do; hieu chuan lai B.6. |
 | Treo khi quet | Xem `scanning` co ve 1 khong (log `[CAM] Bat dau quet`). Fail-safe tu bo sau 20s. |
+| Chi hien **2/3 man hinh** / mat phan ben phai hoac duoi | Panel la ILI9341 **240x320 portrait**; khung hinh ngang 320x240 chi dat duoc bang `tft.setRotation(1)` voi `TFT_WIDTH 240` / `TFT_HEIGHT 320` trong `tft_setup.h`. **Khong** doi thanh `TFT_WIDTH 320` / `TFT_HEIGHT 240` (sai cua so dia chi -> chi ve 2/3). Go `/test`: vien trang phai kin 4 canh va du 4 nhan goc `0,0` / `319,0` / `0,239` / `319,239`. |
+| Anh co soc ngang nhung UI/chu sach | Chay `/test`: neu self-test sach thi panel + driver OK, soc nam trong anh JPEG tu camera (moi truong/anh sang/bien do). Thu tang `SPI_FREQUENCY` len 27-40MHz neu `/stats` bao decode cham. |
+| Boot cham ~2,5 giay | Self-test luc boot (`CYD_SELFTEST 1`). Doi `CYD_SELFTEST` thanh `0` trong `esp32cyd.ino` khi da xac nhan panel tot. |
 
 ## B.8 Ghi chu ky thuat
 
@@ -188,6 +192,19 @@ Cach chon nhanh: cham goc **tren-trai**. Toa do in ra phai gan `(0,0)`.
   VGA quality 12 thuong ~20-50KB nen 112KB la du; neu heap thap, tu tut xuong.
 - `tft.setSwapBytes(true)` vi JPEGDEC xuat RGB565 dang uint16 chuan
   (little-endian), con ILI9341 nhan byte cao truoc.
+- **Huong man hinh:** CYD 2.8" dung panel ILI9341 **240x320 portrait**.
+  Khung ngang 320x240 = `tft.init()` (native 240x320) + `tft.setRotation(1)`.
+  `LCD_W 320` / `LCD_H 240` trong sketch la kich thuoc SAU xoay, khong phai
+  `TFT_WIDTH`/`TFT_HEIGHT`. Doi 2 macro driver thanh 320/240 se lam lech cua so
+  dia chi -> chi hien 2/3 man hinh hoac soc.
+- **Self-test** (`CYD_SELFTEST 1`, ham `drawSelfTest()`): 4 mau dac full man
+  hinh -> vien trang 2px kin 4 canh -> nhan toa do 4 goc -> dong `SELFTEST
+  320x240`. Muc dich: tach loi panel/driver khoi loi anh JPEG. Chay lai bang
+  lenh `/test`. Log boot dung phai la:
+  `[TFT] driver ILI9341, native 240x320 portrait -> rotation1 320x240`.
+- **Chong ghep frame hong:** `readFrame()` bo phan JPEG cu va bat dau lai khi
+  gap SOI moi truoc khi thay EOI (frame bi cat giua chung do rot mang/camera
+  treo) — tranh 2 nua frame dinh nhau gay vach ngang.
 - Stream doc theo chunk (`Transfer-Encoding: chunked` cua esp_http_server);
   tu dong fallback neu server tra raw.
 - `HTTPClient` dung `setReuse(true)` cho `/result` de giam cap phat sinh.
