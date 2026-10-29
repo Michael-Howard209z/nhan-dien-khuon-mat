@@ -460,6 +460,8 @@ static void drawRotCard(uint8_t r) {
 static void runOrientationWizard() {
   const uint8_t prev = g_rotation;
   Serial.println("[TFT] WIZARD: thu lan luot rot 0..7, moi buoc 2 giay.");
+  Serial.println("[TFT] MEO: chi rot 1, 3, 5, 7 moi NGANG va kin man hinh;");
+  Serial.println("[TFT]      0, 2, 4, 6 la DOC -> se thay dai nhieu trang phia tren.");
   Serial.println("[TFT] Khi thay chu doc NGANG, ro va vien trang kin 4 canh");
   Serial.println("[TFT] thi ghi so o dong 'ROT n', roi go: /rot n  (de luu).");
 
@@ -1088,8 +1090,20 @@ static void handleSerialLine(char *line) {
                     (unsigned)g_rotation, tft.width(), tft.height());
       return;
     }
+    const uint8_t prev = g_rotation;
     const uint8_t r = (uint8_t)(atoi(line + 4) & 7);
     applyRotation(r);
+
+    // UI duoc thiet ke 320x240 NGANG. Rotation 0/2/4/6 la DOC 240x320 ->
+    // UI se khong kin man hinh (thua 1/4 phia tren, hien dai nhieu).
+    if (tft.width() < tft.height()) {
+      Serial.printf("[TFT] BO QUA rotation %u: la DOC %dx%d, UI 320x240 se khong kin man hinh.\n",
+                    (unsigned)r, tft.width(), tft.height());
+      Serial.println("[TFT] Chi dung /rot 1, 3, 5 hoac 7 (NGANG 320x240).");
+      applyRotation(prev);                 // quay lai huong ngang dang dung
+      return;
+    }
+
     prefs.putUChar("rot", r);              // Nho huong nay cho cac lan boot sau
     tft.fillScreen(TFT_BLACK);
     lastFrameValid = false;
@@ -1275,6 +1289,16 @@ void setup() {
   uint8_t startRot = prefs.getUChar("rot", 1);
   if (startRot > 7) startRot = 1;
   applyRotation(startRot);
+
+  // UI la 320x240 NGANG. Neu rotation da luu la DOC (0/2/4/6) thi tu doi
+  // sang 1 de man hinh khong bi thua 1/4 phia tren.
+  if (tft.width() < tft.height()) {
+    Serial.printf("[TFT] Rotation da luu (%u) la DOC -> tu doi sang 1 cho NGANG\n",
+                  (unsigned)startRot);
+    startRot = 1;
+    applyRotation(1);
+    prefs.putUChar("rot", 1);
+  }
 
   Serial.printf("[TFT] Kich thuoc theo rotation: 0=%dx%d 1=%dx%d 2=%dx%d 3=%dx%d\n",
                 TFT_WIDTH, TFT_HEIGHT, TFT_HEIGHT, TFT_WIDTH,
