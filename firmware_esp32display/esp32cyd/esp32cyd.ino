@@ -13,8 +13,8 @@
  *       Khi tam dung, man hinh giu khung hinh cuoi + hien "DANG QUET".
  *
  *  Phan cung (xem tft_setup.h):
- *    - ILI9341 320x240 SPI (HSPI): MOSI=13, MISO=12, SCLK=14,
- *      CS=15, DC=2, RST=-1, BL=21
+ *    - ILI9341 240x320 (portrait) SPI HSPI: MOSI=13, MISO=12, SCLK=14,
+ *      CS=15, DC=2, RST=-1, BL=21. Man hinh NGANG 320x240 = setRotation(1).
  *    - XPT2046 (VSPI): CS=33, IRQ=36, CLK=25, MOSI=32, MISO=39
  *
  *  Thu vien can cai:
@@ -41,13 +41,14 @@
 #include <Preferences.h>
 #include <SPI.h>
 #include <FS.h>                // JPEGDEC.h dung kieu File -> phai include truoc
-#include <TFT_eSPI.h>          // tft_setup.h trong sketch duoc tu dong include
+#include "tft_setup.h"         // Nap cau hinh ILI9341/CYD truoc khi include TFT_eSPI
+#include <TFT_eSPI.h>
 #include <XPT2046_Touchscreen.h>
 #include <JPEGDEC.h>
 #include <esp_heap_caps.h>
 
 // ============================== CAU HINH ====================================
-#define FW_VERSION        "2026-10-29-cyd2"
+#define FW_VERSION        "2026-10-29-cyd3"
 
 // 1 = tu chay self-test mau/vien luc boot (~2.5s) de kiem tra panel/doc lap
 // voi camera. Sau khi da xac nhan man hinh tot, doi thanh 0 cho boot nhanh.
@@ -105,6 +106,10 @@
 
 // ============================== DOI TUONG ===================================
 TFT_eSPI tft = TFT_eSPI();
+
+// Rotation dang dung. 1 = landscape 320x240 tu panel native 240x320 portrait.
+// Co the doi truc tiep bang lenh Serial /rot <0..3> de kiem tra tren board that.
+static uint8_t g_rotation = 1;
 
 #if CYD_DISPLAY_ON_VSPI
   SPIClass touchSPI(HSPI);     // man hinh da chiem VSPI -> cam ung dung HSPI
@@ -440,6 +445,13 @@ static void drawSplash(const char *msg) {
   tft.drawString(FW_VERSION, 160, 220, 1);
 }
 
+static void applyRotation(uint8_t r) {
+  g_rotation = r & 7;
+  tft.setRotation(g_rotation);
+  Serial.printf("[TFT] rotation %u -> %dx%d\n",
+                (unsigned)g_rotation, tft.width(), tft.height());
+}
+
 // Self-test panel doc lap voi camera/JPEG:
 //   - 4 mau dac full man hinh (do/xanh la/xanh duong/trang)
 //   - vien trang kin 4 canh + nhan toa do 4 goc
@@ -472,7 +484,10 @@ static void drawSelfTest() {
   tft.drawString(buf, LCD_W / 2, LCD_H / 2 - 10, 4);
   tft.setTextFont(1);
   tft.setTextColor(TFT_LIGHTGREY, TFT_BLACK);
-  tft.drawString("Vien trang kin 4 canh = panel OK", LCD_W / 2, LCD_H / 2 + 22, 1);
+  char line2[48];
+  snprintf(line2, sizeof(line2), "rot %u - Vien trang kin 4 canh = panel OK",
+           (unsigned)g_rotation);
+  tft.drawString(line2, LCD_W / 2, LCD_H / 2 + 22, 1);
   delay(1600);
 }
 
@@ -1067,6 +1082,7 @@ static void handleSerialLine(char *line) {
     Serial.println("  /find               tim ESP32-CAM qua UDP 4321");
     Serial.println("  /live [on|off]      bat/tat xem truc tiep");
     Serial.println("  /test               chay lai self-test man hinh");
+    Serial.println("  /rot 0..3           doi rotation (1 = landscape 320x240)");
     Serial.println("  /stats              thong so");
     Serial.println("  /touch              bat/tat debug toa do cam ung");
     Serial.println("  /reboot");
@@ -1083,6 +1099,20 @@ static void handleSerialLine(char *line) {
     lastFrameValid = false;
     if (ss != SS_LIVE) {
       drawStatusPage("SELFTEST OK", "Vien kin 4 canh = panel OK", TFT_GREEN);
+    }
+    return;
+  }
+  if (strncmp(line, "/rot", 4) == 0 &&
+      (line[4] == '\0' || line[4] == ' ' || line[4] == '\t')) {
+    int r = atoi(line + 4);
+    applyRotation((uint8_t)r);             // 0..3, tu cat ve 0..7
+    tft.fillScreen(TFT_BLACK);
+    lastFrameValid = false;
+    if (ss != SS_LIVE) {
+      char b[40];
+      snprintf(b, sizeof(b), "rot %u: %dx%d", (unsigned)g_rotation,
+               tft.width(), tft.height());
+      drawStatusPage("XOAY MAN HINH", b, TFT_CYAN);
     }
     return;
   }
@@ -1188,12 +1218,31 @@ void setup() {
   digitalWrite(TFT_BL, TFT_BACKLIGHT_ON);
 
   tft.init();
-  tft.setRotation(1);                      // landscape 320x240 từ portrait gốc
   tft.setSwapBytes(true);                  // JPEGDEC xuat uint16 RGB565 chuan (little-endian)
+  applyRotation(1);                        // landscape 320x240 tu portrait goc
+
+  // Kiem tra THAT sau khi xoay: landscape phai rong hon cao. Neu khong (panel
+  // la/thu vien xu ly MADCTL khac), thu ca 4 rotation va chon cai rong nhat.
+  if (tft.width() <= tft.height()) {
+    Serial.println("[TFT] CANH BAO: rotation 1 khong ra landscape -> thu 0..3");
+    for (uint8_t r = 0; r < 4; r++) {
+      tft.setRotation(r);
+      Serial.printf("[TFT]   thu rot %u: %dx%d\n", (unsigned)r, tft.width(), tft.height());
+      if (tft.width() > tft.height()) { g_rotation = r; break; }
+    }
+    tft.setRotation(g_rotation);
+    Serial.printf("[TFT] Chon rotation %u -> %dx%d\n",
+                  (unsigned)g_rotation, tft.width(), tft.height());
+  }
+
   tft.fillScreen(TFT_BLACK);               // dam bao toan bo man hinh duoc xoa mau den
   tft.setTextSize(1);
-  Serial.printf("[TFT] driver ILI9341, native %dx%d portrait -> rotation1 %dx%d\n",
-                TFT_WIDTH, TFT_HEIGHT, tft.width(), tft.height());
+  Serial.printf("[TFT] driver ILI9341 native %dx%d -> rotation%u %dx%d (UI %dx%d)\n",
+                TFT_WIDTH, TFT_HEIGHT, (unsigned)g_rotation,
+                tft.width(), tft.height(), LCD_W, LCD_H);
+  if (tft.width() != LCD_W || tft.height() != LCD_H) {
+    Serial.println("[TFT] LOI: kich thuoc sau xoay KHAC 320x240 -> man hinh se bi cat!");
+  }
 #if CYD_SELFTEST
   Serial.println("[TFT] Self-test panel (4 mau + vien + 4 goc)...");
   drawSelfTest();

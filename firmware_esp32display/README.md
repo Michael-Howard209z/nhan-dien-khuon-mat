@@ -135,6 +135,7 @@ Lenh Serial:
 | `/find` | Tim camera qua UDP 4321 |
 | `/live on` / `/live off` | Bat/tat xem truc tiep |
 | `/test` | Chay lai self-test man hinh (4 mau + vien + 4 goc) |
+| `/rot 0..3` | Doi rotation ngay (1 = landscape 320x240) |
 | `/touch` | Bat/tat in toa do cam ung (hieu chuan) |
 | `/stats` | fps, kich thuoc frame, thoi gian decode, heap |
 | `/reboot` | Khoi dong lai |
@@ -181,7 +182,7 @@ Cach chon nhanh: cham goc **tren-trai**. Toa do in ra phai gan `(0,0)`.
 | `KET NOI` mai | Camera dang bi client khac chiem (mo nhieu tab `/stream`). Dong bot tab. |
 | Cham nut khong an | Chay `/touch` de kiem tra toa do; hieu chuan lai B.6. |
 | Treo khi quet | Xem `scanning` co ve 1 khong (log `[CAM] Bat dau quet`). Fail-safe tu bo sau 20s. |
-| Chi hien **2/3 man hinh** / mat phan ben phai hoac duoi | Panel la ILI9341 **240x320 portrait**; khung hinh ngang 320x240 chi dat duoc bang `tft.setRotation(1)` voi `TFT_WIDTH 240` / `TFT_HEIGHT 320` trong `tft_setup.h`. **Khong** doi thanh `TFT_WIDTH 320` / `TFT_HEIGHT 240` (sai cua so dia chi -> chi ve 2/3). Go `/test`: vien trang phai kin 4 canh va du 4 nhan goc `0,0` / `319,0` / `0,239` / `319,239`. |
+| Chi hien **2/3 man hinh** / mat phan ben phai hoac duoi | Panel la ILI9341 **240x320 portrait**; khung hinh ngang 320x240 chi dat duoc bang `tft.setRotation(1)` voi `TFT_WIDTH 240` / `TFT_HEIGHT 320` trong `tft_setup.h`. **Khong** doi thanh `TFT_WIDTH 320` / `TFT_HEIGHT 240` (sai cua so dia chi -> chi ve 2/3). Go `/test`: vien trang phai kin 4 canh va du 4 nhan goc `0,0` / `319,0` / `0,239` / `319,239`. Neu van portrait: go `/rot 3` hoac `/rot 1` de thu, log se in `rotation N -> WxH`. |
 | Anh co soc ngang nhung UI/chu sach | Chay `/test`: neu self-test sach thi panel + driver OK, soc nam trong anh JPEG tu camera (moi truong/anh sang/bien do). Thu tang `SPI_FREQUENCY` len 27-40MHz neu `/stats` bao decode cham. |
 | Boot cham ~2,5 giay | Self-test luc boot (`CYD_SELFTEST 1`). Doi `CYD_SELFTEST` thanh `0` trong `esp32cyd.ino` khi da xac nhan panel tot. |
 
@@ -197,6 +198,12 @@ Cach chon nhanh: cham goc **tren-trai**. Toa do in ra phai gan `(0,0)`.
   `LCD_W 320` / `LCD_H 240` trong sketch la kich thuoc SAU xoay, khong phai
   `TFT_WIDTH`/`TFT_HEIGHT`. Doi 2 macro driver thanh 320/240 se lam lech cua so
   dia chi -> chi hien 2/3 man hinh hoac soc.
+- **SPI clock 27 MHz:** ILI9341 tren CYD chi nen chay <= 40 MHz. Ban truoc de
+  **60 MHz** (commit f5c7c52 ghi nham "20MHz") gay soc/tearing + chi ve mot phan
+  man hinh. Muon nhanh hon thu 40 MHz; neu con soc ha 20 MHz.
+- **Kiem tra huong luc boot:** `applyRotation(1)` roi kiem tra
+  `tft.width() > tft.height()`; neu khong, tu thu rotation 0..3 va log
+  `[TFT] CANH BAO...`. Lenh `/rot N` doi rotation ngay khong can nap lai.
 - **Self-test** (`CYD_SELFTEST 1`, ham `drawSelfTest()`): 4 mau dac full man
   hinh -> vien trang 2px kin 4 canh -> nhan toa do 4 goc -> dong `SELFTEST
   320x240`. Muc dich: tach loi panel/driver khoi loi anh JPEG. Chay lai bang

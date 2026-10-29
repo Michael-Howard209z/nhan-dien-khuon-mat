@@ -40,8 +40,11 @@
 #define LOAD_GFXFF
 #define SMOOTH_FONT
 
-#define SPI_FREQUENCY       60000000
+#define SPI_FREQUENCY       27000000
 #define SPI_READ_FREQUENCY  10000000
+// Ghi chu: 60MHz tung lam man hinh bi soc/tearing (commit f5c7c52 ghi "20MHz"
+// nhung thuc te de 60MHz). ILI9341 chi nen chay <=40MHz tren CYD.
+// Muon thu nhanh hon: 40000000. Neu van soc -> 20000000.
 #define SPI_TOUCH_FREQUENCY  2500000
 
 #endif
