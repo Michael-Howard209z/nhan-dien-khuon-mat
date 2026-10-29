@@ -186,6 +186,8 @@ static void touchPoll();
 static void handleSerialLine(char *line);
 static void printStats();
 static void drawConnBox(const char *title, const char *sub);
+static void drawRotCard(uint8_t r);
+static void runOrientationWizard();
 
 // ============================== HIEN THI ====================================
 static void drawCenteredFit(const char *text, int16_t x, int16_t y,
@@ -423,6 +425,55 @@ static void drawStatusPage(const char *title, const char *sub, uint16_t accent) 
   drawFooter();
   if (bannerOn && (int32_t)(millis() - bannerUntil) < 0) drawBanner();
   else bannerOn = false;
+}
+
+// ============================== WIZARD HUONG MAN HINH =======================
+// The thu: khung trang + mui ten chi huong LEN cua khung UI + so rotation.
+static void drawRotCard(uint8_t r) {
+  const int w = tft.width();
+  const int h = tft.height();
+
+  tft.fillScreen(TFT_BLACK);
+  for (int i = 0; i < 3; ++i) {
+    tft.drawRect(i, i, w - 2 * i, h - 2 * i, TFT_WHITE);
+  }
+
+  // Mui ten chi "huong len" theo khung toa do UI dang dung
+  const int cx = w / 2;
+  const int ay = h / 2 - 46;
+  tft.fillTriangle(cx, ay, cx - 24, ay + 34, cx + 24, ay + 34, TFT_RED);
+  tft.fillRect(cx - 9, ay + 34, 18, 46, TFT_RED);
+
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+  char b[32];
+  snprintf(b, sizeof(b), "ROT %u", (unsigned)r);
+  tft.drawString(b, cx, h / 2 + 22, 4);
+  snprintf(b, sizeof(b), "%dx%d", w, h);
+  tft.drawString(b, cx, h / 2 + 58, 2);
+  tft.setTextColor(TFT_GREEN, TFT_BLACK);
+  tft.drawString("Chu doc ngang + vien kin 4 canh = huong nay dung",
+                 cx, h - 18, 1);
+}
+
+// Xoay lan luot rotation 0..7, moi buoc 2 giay, de nguoi dung tu chon.
+static void runOrientationWizard() {
+  const uint8_t prev = g_rotation;
+  Serial.println("[TFT] WIZARD: thu lan luot rot 0..7, moi buoc 2 giay.");
+  Serial.println("[TFT] Khi thay chu doc NGANG, ro va vien trang kin 4 canh");
+  Serial.println("[TFT] thi ghi so o dong 'ROT n', roi go: /rot n  (de luu).");
+
+  for (uint8_t r = 0; r < 8; ++r) {
+    applyRotation(r);
+    drawRotCard(r);
+    Serial.printf("[TFT]   thu rot %u -> %dx%d\n", (unsigned)r,
+                  tft.width(), tft.height());
+    delay(2000);
+  }
+
+  applyRotation(prev);
+  drawStatusPage("XOAY MAN HINH", "Da thu xong 0..7 - go /rot N", TFT_CYAN);
+  Serial.printf("[TFT] Wizard xong. Quay lai rot %u.\n", (unsigned)prev);
 }
 
 // ============================== JPEG DECODE =================================
@@ -980,6 +1031,7 @@ static void handleSerialLine(char *line) {
     Serial.println("  /test               chay lai self-test man hinh");
     Serial.println("  /rot 0..7           doi rotation va LUU lai (1 hoac 3 = ngang 320x240)");
     Serial.println("  /rot                xem rotation dang dung");
+    Serial.println("  /wizard             tu thu rot 0..7 de tim huong man hinh dung");
     Serial.println("  /touch              bat/tat in toa do cam ung");
     Serial.println("  /stats              thong so stream / heap / fps");
     Serial.println("  /reboot             khoi dong lai");
@@ -1010,6 +1062,11 @@ static void handleSerialLine(char *line) {
   if (!strcmp(line, "/find")) {
     Serial.println("[DISC] Tim camera qua UDP...");
     if (udpReady) discoverCam(1500);
+    return;
+  }
+
+  if (!strcmp(line, "/wizard")) {
+    runOrientationWizard();
     return;
   }
 
@@ -1206,8 +1263,14 @@ void setup() {
   tft.init();
   tft.setSwapBytes(true);                  // JPEGDEC xuat RGB565 little-endian
 
+  // Khi firmware doi phien ban, bo qua rotation cu (co the chon sai o ban
+  // truoc) de ve mac dinh 1 = landscape 320x240.
+  if (prefs.getString("rotfw", "") != FW_VERSION) {
+    prefs.remove("rot");
+    prefs.putString("rotfw", FW_VERSION);
+  }
+
   // Rotation: lay cai da luu bang lenh /rot (nho qua cac lan reboot).
-  // Mac dinh 1 = landscape 320x240 (panel 240x320 doc).
   const bool hadSavedRot = prefs.isKey("rot");
   uint8_t startRot = prefs.getUChar("rot", 1);
   if (startRot > 7) startRot = 1;

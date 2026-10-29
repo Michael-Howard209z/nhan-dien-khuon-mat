@@ -30,11 +30,17 @@
 
 #if CYD_PANEL_ST7789
   #define ST7789_DRIVER
-  #define TFT_RGB_ORDER TFT_BGR    // mau dung cho ST7789 tren CYD 2 cong USB
   #define TFT_INVERSION_OFF
 #else
   #define ILI9341_DRIVER
 #endif
+
+// ---------------------------------------------------------------------------
+//  Thu tu mau. Neu mau bi HOAN DOI (DO <-> XANH, cyan hien thanh vang) thi
+//  doi TFT_RGB <-> TFT_BGR. Panel cua board nay can TFT_RGB (da kiem chung
+//  bang anh chup: nen xanh dam hien ra do ~ sai thu tu mau BGR mac dinh).
+// ---------------------------------------------------------------------------
+#define TFT_RGB_ORDER TFT_RGB
 
 // Native PORTRAIT - KHONG doi thanh 320/240 (xem ghi chu dau file).
 #define TFT_WIDTH   240

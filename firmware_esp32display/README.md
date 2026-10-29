@@ -139,7 +139,9 @@ Lenh Serial:
 | `/find` | Tim camera qua UDP 4321 |
 | `/live on` / `/live off` | Bat/tat xem truc tiep |
 | `/test` | Chay lai self-test man hinh (4 mau + vien + 4 goc) |
-| `/rot 0..7` | Doi rotation ngay (mac dinh 1 = landscape 320x240; tu thu 0..3 neu khong ra landscape) |
+| `/rot 0..7` | Doi rotation ngay va **luu vao NVS** (mac dinh 1 = landscape 320x240) |
+| `/rot` | Xem rotation dang dung |
+| `/wizard` | Tu thu lan luot rot 0..7 (2s/buoc) + the kiem tra de tim huong dung |
 | `/touch` | Bat/tat in toa do cam ung (hieu chuan) |
 | `/stats` | fps, kich thuoc frame, thoi gian decode, heap |
 | `/reboot` | Khoi dong lai |
@@ -179,7 +181,8 @@ Cach chon nhanh: cham goc **tren-trai**. Toa do in ra phai gan `(0,0)`.
 | Hien tuong | Nguyen nhan / cach xu ly |
 |---|---|
 | Man hinh trang, khong hien gi | Sai bien the day SPI -> doi `CYD_DISPLAY_ON_VSPI` 0 <-> 1. Kiem tra lai chan BL=21. |
-| Mau bi sai (am ban / do <-> xanh) | Board 2 cong USB co the dung panel ST7789: mo `tft_setup.h`, doi `#define CYD_PANEL_ST7789 0` thanh `1`. |
+| Mau bi sai: DO <-> XANH, cyan hien thanh vang | Doi thu tu mau trong `tft_setup.h`: `#define TFT_RGB_ORDER TFT_RGB` <-> `TFT_BGR`. |
+| Mau bi am ban (inverted) | Board 2 cong USB co the dung panel ST7789: doi `#define CYD_PANEL_ST7789 0` thanh `1` trong `tft_setup.h`. |
 | Man hinh toi, co chu mo | Chinh do sang bang PWM o `TFT_BL` (hien dang bat muc cao). |
 | Khong thay camera | Go `/find`, roi `/ip <ip-cam>`. Kiem tra cung WiFi/LAN, ESP32-CAM dang bat. |
 | Anh giat, fps thap | Xem `/stats`: neu decode > 60ms, kiem tra `SPI_FREQUENCY` (40MHz). Nhieu client stream cung luc se tranh frame. |
