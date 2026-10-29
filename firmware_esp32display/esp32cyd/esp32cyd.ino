@@ -978,7 +978,8 @@ static void handleSerialLine(char *line) {
     Serial.println("  /find               tim camera qua UDP 4321");
     Serial.println("  /live on|off        bat/tat xem truc tiep");
     Serial.println("  /test               chay lai self-test man hinh");
-    Serial.println("  /rot 0..7           doi rotation (mac dinh 1 = landscape 320x240)");
+    Serial.println("  /rot 0..7           doi rotation va LUU lai (1 hoac 3 = ngang 320x240)");
+    Serial.println("  /rot                xem rotation dang dung");
     Serial.println("  /touch              bat/tat in toa do cam ung");
     Serial.println("  /stats              thong so stream / heap / fps");
     Serial.println("  /reboot             khoi dong lai");
@@ -1025,13 +1026,21 @@ static void handleSerialLine(char *line) {
 
   if (strncmp(line, "/rot", 4) == 0 &&
       (line[4] == '\0' || line[4] == ' ' || line[4] == '\t')) {
-    int r = atoi(line + 4);
-    applyRotation((uint8_t)r);
+    if (line[4] == '\0') {                 // /rot  -> xem huong dang dung
+      Serial.printf("[TFT] rotation hien tai: %u (%dx%d). Dung: /rot 0..7\n",
+                    (unsigned)g_rotation, tft.width(), tft.height());
+      return;
+    }
+    const uint8_t r = (uint8_t)(atoi(line + 4) & 7);
+    applyRotation(r);
+    prefs.putUChar("rot", r);              // Nho huong nay cho cac lan boot sau
     tft.fillScreen(TFT_BLACK);
     lastFrameValid = false;
+    Serial.printf("[TFT] Da luu rotation %u -> %dx%d\n",
+                  (unsigned)g_rotation, tft.width(), tft.height());
     if (!scanning) {
-      char b[40];
-      snprintf(b, sizeof(b), "rot %u: %dx%d", (unsigned)g_rotation,
+      char b[48];
+      snprintf(b, sizeof(b), "rot %u: %dx%d (da luu)", (unsigned)g_rotation,
                tft.width(), tft.height());
       drawStatusPage("XOAY MAN HINH", b, TFT_CYAN);
     }
@@ -1142,6 +1151,42 @@ static void touchPoll() {
   lastTap = now;
 }
 
+// ============================== RAM =========================================
+// Cap bo dem JPEG: uu tien PSRAM; neu khong co thi tu tut kich thuoc dan cho
+// toi khi vua DRAM (tranh truong hop cap 112KB that bai -> khong co bo dem ->
+// khong bao gio hien duoc video).
+static void allocJpegBuffer() {
+  static const uint16_t kSizesKB[] = {112, 96, 80, 64, 48, 32, 24, 16};
+
+  for (uint8_t i = 0; i < sizeof(kSizesKB) / sizeof(kSizesKB[0]); ++i) {
+    const size_t bytes = (size_t)kSizesKB[i] * 1024;
+
+    // 1. Thu PSRAM (board co PSRAM)
+    uint8_t *p = (uint8_t *)heap_caps_malloc(bytes,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+
+    // 2. Khong co PSRAM (hoac PSRAM het) -> thu DRAM neu con khoi lien tuc du
+    if (!p) {
+      const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+      if (largest > bytes + 8192) p = (uint8_t *)malloc(bytes);
+    }
+
+    if (p) {
+      jpegBuf = p;
+      jpegCap = bytes;
+      Serial.printf("[RAM] JPEG buffer: %u KB (heap trong: %u B, lon nhat %u B)\n",
+                    (unsigned)kSizesKB[i], (unsigned)ESP.getFreeHeap(),
+                    (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+      return;
+    }
+  }
+
+  jpegBuf = nullptr;
+  jpegCap = 0;
+  Serial.printf("[RAM] LOI: khong cap duoc bo dem JPEG (heap %u B) -> khong xem duoc video!\n",
+                (unsigned)ESP.getFreeHeap());
+}
+
 // ============================== SETUP =======================================
 void setup() {
   Serial.begin(115200);
@@ -1149,12 +1194,10 @@ void setup() {
   Serial.println("=== CYD ESP32-2432S028R - MAN HINH CAN MAT ===");
   Serial.printf("=== Firmware %s ===\n", FW_VERSION);
 
-  // Cap bo dem JPEG
-  jpegBuf = (uint8_t *)heap_caps_malloc(112 * 1024,
-                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-  if (!jpegBuf) jpegBuf = (uint8_t *)malloc(112 * 1024);
-  jpegCap = jpegBuf ? 112 * 1024 : 0;
-  Serial.printf("[RAM] JPEG buffer: %u bytes\n", (unsigned)jpegCap);
+  // NVS: noi luu IP camera + rotation da chon
+  prefs.begin("cyd", false);
+
+  allocJpegBuffer();
 
   // Backlight truoc khi init de tranh nhay trang
   pinMode(TFT_BL, OUTPUT);
@@ -1162,12 +1205,22 @@ void setup() {
 
   tft.init();
   tft.setSwapBytes(true);                  // JPEGDEC xuat RGB565 little-endian
-  applyRotation(1);                        // panel 240x320 doc -> rot 1 = ngang 320x240
 
-  // Kiem tra THAT sau khi xoay: phai landscape (rong > cao). Neu khong,
-  // thu 0..3 va chon cai landscape dau tien (1 hoac 3).
-  if (tft.width() <= tft.height()) {
-    Serial.println("[TFT] CANH BAO: rot 1 khong ra landscape -> thu 0..3");
+  // Rotation: lay cai da luu bang lenh /rot (nho qua cac lan reboot).
+  // Mac dinh 1 = landscape 320x240 (panel 240x320 doc).
+  const bool hadSavedRot = prefs.isKey("rot");
+  uint8_t startRot = prefs.getUChar("rot", 1);
+  if (startRot > 7) startRot = 1;
+  applyRotation(startRot);
+
+  Serial.printf("[TFT] Kich thuoc theo rotation: 0=%dx%d 1=%dx%d 2=%dx%d 3=%dx%d\n",
+                TFT_WIDTH, TFT_HEIGHT, TFT_HEIGHT, TFT_WIDTH,
+                TFT_WIDTH, TFT_HEIGHT, TFT_HEIGHT, TFT_WIDTH);
+
+  // Neu nguoi dung CHUA chon rotation nao ma cai mac dinh khong ra landscape
+  // thi tu thu 0..3 va chon cai landscape dau tien.
+  if (!hadSavedRot && tft.width() <= tft.height()) {
+    Serial.println("[TFT] CANH BAO: rotation mac dinh khong ra landscape -> thu 0..3");
     for (uint8_t r = 0; r < 4; r++) {
       tft.setRotation(r);
       Serial.printf("[TFT]   thu rot %u: %dx%d\n", (unsigned)r,
@@ -1176,6 +1229,11 @@ void setup() {
     }
     tft.setRotation(g_rotation);
     Serial.printf("[TFT] Chon rotation %u -> %dx%d\n",
+                  (unsigned)g_rotation, tft.width(), tft.height());
+  }
+
+  if (hadSavedRot) {
+    Serial.printf("[TFT] Dung rotation da luu (/rot %u) -> %dx%d\n",
                   (unsigned)g_rotation, tft.width(), tft.height());
   }
 
@@ -1190,7 +1248,8 @@ void setup() {
                 TFT_WIDTH, TFT_HEIGHT, (unsigned)g_rotation,
                 tft.width(), tft.height(), LCD_W, LCD_H);
   if (tft.width() != LCD_W || tft.height() != LCD_H) {
-    Serial.println("[TFT] LOI: kich thuoc sau xoay KHAC 320x240 -> man hinh se bi cat!");
+    Serial.println("[TFT] CHU Y: kich thuoc sau xoay KHAC 320x240 (UI se bi cat).");
+    Serial.println("[TFT]        Go /rot 1 hoac /rot 3 de chon huong NGANG dung.");
   }
 
 #if CYD_SELFTEST
@@ -1207,8 +1266,7 @@ void setup() {
 
   drawSplash("Dang khoi dong...");
 
-  // NVS: lay IP camera da luu
-  prefs.begin("cyd", false);
+  // NVS: lay IP camera da luu (prefs da begin tu dau setup)
   String saved = prefs.getString("camip", "");
   if (saved.length() && isIp4Lan(saved.c_str())) {
     strncpy(camIp, saved.c_str(), sizeof(camIp) - 1);
