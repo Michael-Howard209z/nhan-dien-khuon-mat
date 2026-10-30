@@ -1034,6 +1034,8 @@ static void handleSerialLine(char *line) {
     Serial.println("  /rot 0..7           doi rotation va LUU lai (1 hoac 3 = ngang 320x240)");
     Serial.println("  /rot                xem rotation dang dung");
     Serial.println("  /wizard             tu thu rot 0..7 de tim huong man hinh dung");
+    Serial.println("  /panel              doc ma chip dieu khien man hinh (ILI9341/ST7789)");
+    Serial.println("  /drv st7789|ili9341|auto   doi driver panel (can /reboot)");
     Serial.println("  /touch              bat/tat in toa do cam ung");
     Serial.println("  /stats              thong so stream / heap / fps");
     Serial.println("  /reboot             khoi dong lai");
@@ -1069,6 +1071,34 @@ static void handleSerialLine(char *line) {
 
   if (!strcmp(line, "/wizard")) {
     runOrientationWizard();
+    return;
+  }
+
+  if (!strcmp(line, "/panel")) {
+    printPanelInfo();
+    Serial.printf("[TFT] rotation %u -> %dx%d\n", (unsigned)g_rotation,
+                  tft.width(), tft.height());
+    return;
+  }
+
+  if (!strncmp(line, "/drv", 4) &&
+      (line[4] == '\0' || line[4] == ' ')) {
+    char *arg = line + 4;
+    while (*arg == ' ') arg++;
+    if (!strcmp(arg, "st7789")) {
+      prefs.putUChar("drv", 1);
+      Serial.println("[TFT] Da chon driver ST7789. Go /reboot de ap dung.");
+    } else if (!strcmp(arg, "ili9341")) {
+      prefs.putUChar("drv", 2);
+      Serial.println("[TFT] Da chon driver ILI9341. Go /reboot de ap dung.");
+    } else if (!strcmp(arg, "auto")) {
+      prefs.putUChar("drv", 0);
+      Serial.println("[TFT] Che do tu dong do panel. Go /reboot de ap dung.");
+    } else {
+      Serial.printf("[TFT] driver dang dat: drv=%u (0=tu dong, 1=ST7789, 2=ILI9341)\n",
+                    (unsigned)prefs.getUChar("drv", 0));
+      Serial.println("[TFT] Dung: /drv st7789 | /drv ili9341 | /drv auto");
+    }
     return;
   }
 
@@ -1222,6 +1252,103 @@ static void touchPoll() {
   lastTap = now;
 }
 
+// ============================== PANEL ID / DRIVER ===========================
+// Doc ma chip dieu khien bang lenh RDDID (0x04) qua SPI truc tiep.
+//   ILI9341 -> 0x009341     ST7789 -> 0x858552 (hoac 0x8585xx)
+// Tra ve 0 neu khong doc duoc (nhieu board khong noi MISO cua man hinh).
+static uint32_t readPanelId() {
+#if defined(TFT_MISO) && (TFT_MISO >= 0)
+  SPIClass &spi = tft.getSPIinstance();
+
+  pinMode(TFT_CS, OUTPUT);
+  pinMode(TFT_DC, OUTPUT);
+  pinMode(TFT_MISO, INPUT_PULLUP);
+  digitalWrite(TFT_CS, HIGH);
+
+  spi.beginTransaction(SPISettings(4000000, MSBFIRST, TFT_SPI_MODE));
+  digitalWrite(TFT_CS, LOW);
+  digitalWrite(TFT_DC, LOW);          // lenh
+  spi.transfer(0x04);                 // RDDID
+  digitalWrite(TFT_DC, HIGH);         // du lieu
+  spi.transfer(0x00);                 // dummy
+  const uint8_t a = spi.transfer(0x00);
+  const uint8_t b = spi.transfer(0x00);
+  const uint8_t c = spi.transfer(0x00);
+  digitalWrite(TFT_CS, HIGH);
+  spi.endTransaction();
+
+  return ((uint32_t)a << 16) | ((uint32_t)b << 8) | c;
+#else
+  return 0;
+#endif
+}
+
+static bool looksLikeST7789(uint32_t id) {
+  if (!id) return false;
+  if ((id >> 8) == 0x8585) return true;          // 0x8585xx
+  if ((id >> 8) == 0x7789 || (id & 0xFFFF) == 0x7789) return true;
+  return false;
+}
+
+static bool looksLikeILI9341(uint32_t id) {
+  return (id >> 8) == 0x0093 || (id & 0xFFFF) == 0x9341;
+}
+
+// Nap lai chuoi init cua ST7789 (dung khi panel thuc te la ST7789 nhung
+// TFT_eSPI dang duoc build voi ILI9341_DRIVER).
+static void initPanelST7789() {
+  static const uint8_t gamP[14] = {0xD0, 0x00, 0x02, 0x07, 0x0A, 0x28, 0x32,
+                                   0x44, 0x42, 0x06, 0x0E, 0x12, 0x14, 0x17};
+  static const uint8_t gamN[14] = {0xD0, 0x00, 0x02, 0x07, 0x0A, 0x28, 0x31,
+                                   0x54, 0x47, 0x0E, 0x1C, 0x17, 0x1B, 0x1E};
+
+  tft.writecommand(0x01);                        // SWRESET
+  delay(150);
+  tft.writecommand(0x11);                        // SLPOUT
+  delay(120);
+  tft.writecommand(0x13);                        // NORON
+
+  tft.writecommand(0x36); tft.writedata(0x00);   // MADCTL (setRotation lo lai sau)
+  tft.writecommand(0xB6); tft.writedata(0x0A); tft.writedata(0x82);
+  tft.writecommand(0xB0); tft.writedata(0x00); tft.writedata(0xE0);
+  tft.writecommand(0x3A); tft.writedata(0x55);   // 16-bit mau
+  tft.writecommand(0xB2); tft.writedata(0x0C); tft.writedata(0x0C);
+  tft.writedata(0x00); tft.writedata(0x33); tft.writedata(0x33);
+  tft.writecommand(0xB7); tft.writedata(0x35);
+  tft.writecommand(0xBB); tft.writedata(0x28);
+  tft.writecommand(0xC0); tft.writedata(0x0C);
+  tft.writecommand(0xC2); tft.writedata(0x01); tft.writedata(0xFF);
+  tft.writecommand(0xC3); tft.writedata(0x10);
+  tft.writecommand(0xC4); tft.writedata(0x20);
+  tft.writecommand(0xC6); tft.writedata(0x0F);
+  tft.writecommand(0xD0); tft.writedata(0xA4); tft.writedata(0xA1);
+  tft.writecommand(0xE0);
+  for (uint8_t i = 0; i < sizeof(gamP); ++i) tft.writedata(gamP[i]);
+  tft.writecommand(0xE1);
+  for (uint8_t i = 0; i < sizeof(gamN); ++i) tft.writedata(gamN[i]);
+  tft.writecommand(0x21);                        // INVON
+  tft.writecommand(0x29);                        // DISPON
+  delay(50);
+}
+
+// In chan doan panel ra Serial (dung o setup va lenh /panel).
+static void printPanelInfo() {
+  const uint32_t id = readPanelId();
+  Serial.printf("[TFT] Panel ID (SPI truc tiep, RDDID 0x04) = 0x%06X\n",
+                (unsigned)id);
+  if (looksLikeST7789(id))      Serial.println("[TFT]   -> nhan dien: ST7789");
+  else if (looksLikeILI9341(id)) Serial.println("[TFT]   -> nhan dien: ILI9341");
+  else if (id)                   Serial.println("[TFT]   -> khong ro (ma la)");
+  else                           Serial.println("[TFT]   -> khong doc duoc (MISO?)");
+
+  // Thu them co che doc indexed cua TFT_eSPI (chi ILI9341 moi ho tro)
+  const uint8_t r04a = tft.readcommand8(0x04, 0);
+  const uint8_t r04b = tft.readcommand8(0x04, 1);
+  const uint8_t r04c = tft.readcommand8(0x04, 2);
+  Serial.printf("[TFT] readcommand8 0x04 = %02X %02X %02X\n",
+                r04a, r04b, r04c);
+}
+
 // ============================== RAM =========================================
 // Cap bo dem JPEG: uu tien PSRAM; neu khong co thi tu tut kich thuoc dan cho
 // toi khi vua DRAM (tranh truong hop cap 112KB that bai -> khong co bo dem ->
@@ -1276,6 +1403,23 @@ void setup() {
 
   tft.init();
   tft.setSwapBytes(true);                  // JPEGDEC xuat RGB565 little-endian
+
+  // Doc ma chip dieu khien. Neu la ST7789 (mot so ban CYD khong "R") thi nap
+  // lai chuoi init ST7789 vi TFT_eSPI dang duoc build voi ILI9341_DRIVER.
+  printPanelInfo();
+  {
+    // drv: 0 = tu dong do panel, 1 = ep ST7789, 2 = ep ILI9341 (khong lam gi)
+    const uint32_t pid = readPanelId();
+    const uint8_t drv = prefs.getUChar("drv", 0);
+    if (drv == 1 || (drv == 0 && looksLikeST7789(pid))) {
+      Serial.println("[TFT] Nap chuoi init ST7789...");
+      initPanelST7789();
+      tft.setSwapBytes(true);
+      Serial.println("[TFT] Da nap xong init ST7789");
+    } else {
+      Serial.printf("[TFT] Giu init ILI9341 (drv=%u)\n", (unsigned)drv);
+    }
+  }
 
   // Khi firmware doi phien ban, bo qua rotation cu (co the chon sai o ban
   // truoc) de ve mac dinh 1 = landscape 320x240.
