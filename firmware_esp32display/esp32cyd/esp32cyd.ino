@@ -47,7 +47,7 @@
 #include <esp_heap_caps.h>
 
 // ============================== CAU HINH ====================================
-#define FW_VERSION        "2026-10-30-cyd10"
+#define FW_VERSION        "2026-10-30-cyd11"
 
 #define CYD_SELFTEST      1    // 1 = tu chay self-test luc boot (~2.5s)
 
@@ -802,7 +802,8 @@ static void applyResult(const char *json) {
     // Bo qua ket qua /result cu (gui truoc khi bam nut). Chi ket thuc neu da
     // lau khong con tin hieu quet nao (UDP SCAN|0 se ket thuc ngay lap tuc).
     // /scan (forcedScan) KHONG bi /result ket thuc -> du de test video.
-    if (lastScanNotifyMs == 0 || millis() - lastScanNotifyMs > 1200) {
+    if (lastScanNotifyMs == 0 ||
+        (int32_t)(millis() - lastScanNotifyMs) > 1200) {
       endScan("result");
     }
   }
@@ -1615,9 +1616,16 @@ void loop() {
 
   // ---------------- Fail-safe: mat tin hieu "dang quet" ----------------
   if (scanning) {
+    // SO SANH CO DAU la bat buoc: lastScanNotifyMs duoc dat bang millis() MOI
+    // (tre hon `now` lay o dau vong lap vai ms), nen tru kieu unsigned se bi
+    // underflow -> "now - last" thanh so cuc lon -> cat phim quet NGAY LAP TUC.
+    // Day chinh la loi khien BAM NUT khong hien hinh (moi lan "timeout" sau
+    // 2ms) trong khi /scan van chay vi co co forcedScan.
     const uint32_t last = lastScanNotifyMs ? lastScanNotifyMs : scanStartMs;
-    const bool lost = !forcedScan && (now - last > SCAN_NOTIFY_MS);
-    if (lost || (now - scanStartMs > SCAN_MAX_MS)) {
+    const int32_t age = (int32_t)(millis() - last);
+    const int32_t total = (int32_t)(millis() - scanStartMs);
+    const bool lost = !forcedScan && (age > (int32_t)SCAN_NOTIFY_MS);
+    if (lost || total > (int32_t)SCAN_MAX_MS) {
       endScan(forcedScan ? "het 20s (ep tay)" : "timeout");
     }
   }
@@ -1639,7 +1647,8 @@ void loop() {
       }
     } else {
       // Vua quet xong: giu khung cuoi them RESULT_HOLD_MS roi ve trang cho.
-      const bool holding = scanEndMs && (now - scanEndMs < RESULT_HOLD_MS);
+      const bool holding = scanEndMs &&
+          ((int32_t)(now - scanEndMs) < (int32_t)RESULT_HOLD_MS);
       if (!holding && !standbyShown) {
         drawStandbyPage();
         standbyShown = true;

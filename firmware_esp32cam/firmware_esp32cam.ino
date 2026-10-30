@@ -1785,8 +1785,11 @@ static void doButtonCapture() {
       }
     }
 
-    if (fails >= BUTTON_MAX_FAILS) {
-      Serial.println("[BTN] Loi ket noi/camera lien tiep qua nguong -> dung dot quet");
+    // Loi MANG (khong ket noi duoc server) KHONG dung dot quet: man hinh CYD
+    // van can xem hinh de can khung ngay ca khi server chua bat. Chi dung khi
+    // loi CAMERA (khong lay duoc khung) lien tiep qua nguong.
+    if (last_fail == 4 && fails >= BUTTON_MAX_FAILS) {
+      Serial.println("[BTN] Loi CAMERA lien tiep qua nguong -> dung dot quet");
       break;
     }
     delay(BUTTON_POST_GAP_MS);   // nhip quet ~2-3 khung/giay
