@@ -1683,8 +1683,14 @@ static void doButtonCapture() {
       discNotifyScan(true);
     }
 
+    // Thu lai vai lan neu camera dang bi task stream :81 giu (fb_count=1):
+    // tranh tinh nham la "loi camera" roi dung ca dot quet giua chung.
+    camera_fb_t *fb = NULL;
     uint32_t t_get = millis();
-    camera_fb_t *fb = esp_camera_fb_get();
+    for (int tryN = 0; tryN < 6 && !fb; ++tryN) {
+      fb = esp_camera_fb_get();
+      if (!fb) delay(15);
+    }
     uint32_t dt_get = millis() - t_get;
     if (!fb) {
       Serial.printf("[BTN] loi CAMERA: khong lay duoc khung (fb NULL, doi %lu ms, heap %u)\n",

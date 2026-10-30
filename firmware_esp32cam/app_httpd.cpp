@@ -319,50 +319,55 @@ static esp_err_t stream_handler(httpd_req_t *req) {
 #endif
 
   while (true) {
-    // ---- Trong dot quet nut: gui khung do doButtonCapture() vua chup ----
-    // KHONG goi esp_camera_fb_get() o day (fb_count=1) de dot quet khong bi
-    // mat frame. Khi khong quet (xem web binh thuong) van chup nhu cu.
-    if (g_is_scanning && g_share_buf && g_share_mux && g_share_cap) {
-      if (g_share_len == 0 || g_share_seq == last_share_seq) {
-        vTaskDelay(pdMS_TO_TICKS(10));
-        continue;
-      }
-      if (!tx_buf) {
-        tx_buf = (uint8_t *)heap_caps_malloc(g_share_cap,
-                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (!tx_buf) tx_buf = (uint8_t *)malloc(g_share_cap);
-      }
-      if (!tx_buf) {
-        log_e("Share tx buffer alloc failed -> fallback fb_get");
-      } else if (xSemaphoreTake(g_share_mux, pdMS_TO_TICKS(1000)) == pdTRUE) {
-        size_t len = g_share_len;
-        if (len > g_share_cap) len = g_share_cap;
-        memcpy(tx_buf, g_share_buf, len);
-        uint32_t seq = g_share_seq;
-        xSemaphoreGive(g_share_mux);
+    // ---- Uu tien TU CHUP khung (giong che do xem binh thuong) ------------
+    // Truoc day: khi dang quet, stream CHI doc ban copy tu g_share_buf. Neu
+    // ben do khong cap nhat (hoac cap nhat cham) thi stream dung im -> man
+    // hinh CYD khong co hinh, trong khi /scan (khong quet) van co hinh.
+    // Nay: tu chup truoc nhu binh thuong; chi khi camera dang bi task quet
+    // giu (fb = NULL) moi dung khung chia se lam phuong an du phong.
+    fb = esp_camera_fb_get();
 
-        struct timeval tv;
-        gettimeofday(&tv, NULL);
-        size_t hlen = snprintf(part_buf, sizeof(part_buf), _STREAM_PART,
-                               (unsigned)len, (int)tv.tv_sec, (int)tv.tv_usec);
-        res = httpd_resp_send_chunk(req, part_buf, hlen);
-        if (res == ESP_OK) {
-          res = httpd_resp_send_chunk(req, (const char *)tx_buf, len);
+    if (!fb && g_share_buf && g_share_mux && g_share_len > 0) {
+      if (g_share_seq != last_share_seq) {
+        if (!tx_buf) {
+          tx_buf = (uint8_t *)heap_caps_malloc(g_share_cap,
+                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+          if (!tx_buf) tx_buf = (uint8_t *)malloc(g_share_cap);
         }
-        if (res != ESP_OK) {
-          log_e("Send shared frame failed");
-          break;
+        if (tx_buf && xSemaphoreTake(g_share_mux, pdMS_TO_TICKS(200)) == pdTRUE) {
+          size_t len = g_share_len;
+          if (len > g_share_cap) len = g_share_cap;
+          memcpy(tx_buf, g_share_buf, len);
+          uint32_t seq = g_share_seq;
+          xSemaphoreGive(g_share_mux);
+
+          struct timeval tv;
+          gettimeofday(&tv, NULL);
+          size_t hlen = snprintf(part_buf, sizeof(part_buf), _STREAM_PART,
+                                 (unsigned)len, (int)tv.tv_sec, (int)tv.tv_usec);
+          res = httpd_resp_send_chunk(req, part_buf, hlen);
+          if (res == ESP_OK) {
+            res = httpd_resp_send_chunk(req, (const char *)tx_buf, len);
+          }
+          if (res != ESP_OK) {
+            log_e("Send shared frame failed");
+            break;
+          }
+          last_share_seq = seq;
+          continue;
         }
-        last_share_seq = seq;
-        continue;
-      } else {
-        vTaskDelay(pdMS_TO_TICKS(5));
-        continue;
       }
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
     }
 
-    fb = esp_camera_fb_get();
     if (!fb) {
+      // Trong dot quet, task quet co the dang giu camera -> thu lai, KHONG
+      // ngat stream (ngat stream lam man hinh CYD mat hinh giua chung).
+      if (g_is_scanning) {
+        vTaskDelay(pdMS_TO_TICKS(15));
+        continue;
+      }
       log_e("Camera capture failed");
       res = ESP_FAIL;
     } else {
