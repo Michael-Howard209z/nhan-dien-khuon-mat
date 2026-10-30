@@ -47,7 +47,7 @@
 #include <esp_heap_caps.h>
 
 // ============================== CAU HINH ====================================
-#define FW_VERSION        "2026-10-30-cyd8"
+#define FW_VERSION        "2026-10-30-cyd9"
 
 #define CYD_SELFTEST      1    // 1 = tu chay self-test luc boot (~2.5s)
 
@@ -148,6 +148,7 @@ static uint32_t lastStatsMs = 0;
 static uint32_t lastScanOverlayMs = 0;
 
 static uint32_t framesThisSec = 0;
+static uint32_t framesTotal = 0;
 static uint32_t fps = 0;
 static uint32_t lastDecodeMs = 0;
 static size_t lastFrameBytes = 0;
@@ -579,7 +580,8 @@ static bool streamConnect() {
   streamStop();
   if (WiFi.status() != WL_CONNECTED) return false;
 
-  Serial.printf("[CAM] Ket noi stream %s:%d ...\n", camIp, CAM_STREAM_PORT);
+  Serial.printf("[%lums] [CAM] Ket noi stream %s:%d ...\n",
+                (unsigned long)millis(), camIp, CAM_STREAM_PORT);
   IPAddress addr;
   if (!addr.fromString(camIp)) {
     Serial.printf("[CAM] IP khong hop le: %s\n", camIp);
@@ -679,7 +681,8 @@ static int readFrame(size_t *outLen) {
 
     if (prev == 0xFF && b == 0xD9) {          // EOI
       if (overflow) {
-        Serial.printf("[CAM] Bo frame > %u bytes\n", (unsigned)jpegCap);
+        Serial.printf("[%lums] [CAM] Bo frame > %u bytes (thieu bo dem)\n",
+                      (unsigned long)millis(), (unsigned)jpegCap);
         return 0;
       }
       *outLen = n;
@@ -701,24 +704,32 @@ static void resultHttpClose() {
 static bool pollResult() {
   if (WiFi.status() != WL_CONNECTED) return false;
 
+  // Timeout NGAN + khong dung lai ket noi (setReuse false) de 1 lan poll loi
+  // khong chan vong lap chinh (truoc day connect 700ms + doc 1100ms lam nghen
+  // loop -> stream :81 khong kip mo trong cua so quet).
   if (!resultHttpOpen) {
-    resultHttp.setConnectTimeout(700);
-    resultHttp.setTimeout(1100);
-    resultHttp.setReuse(true);
+    resultHttp.setConnectTimeout(400);
+    resultHttp.setTimeout(900);
+    resultHttp.setReuse(false);
     if (!resultHttp.begin(String(camIp), CAM_HTTP_PORT, "/result")) {
       return false;
     }
     resultHttpOpen = true;
   }
 
-  int code = resultHttp.GET();
+  const int code = resultHttp.GET();
   if (code == 200) {
     String body = resultHttp.getString();
     if (body.length() > 0 && body.length() < 2048) {
       applyResult(body.c_str());
       return true;
     }
+    Serial.printf("[CAM] /result tra ve rong (code=%d, len=%u)\n",
+                  code, (unsigned)body.length());
   } else if (code <= 0) {
+    resultHttpClose();
+  } else {
+    Serial.printf("[CAM] /result HTTP code=%d\n", code);
     resultHttpClose();
   }
   return false;
@@ -763,7 +774,8 @@ static void startScan(const char *why) {
   lastFrameValid = false;
   lastScanOverlayMs = 0;
   lastRetry = 0;
-  Serial.printf("[CAM] Bat dau quet (%s) -> MO stream :81\n", why);
+  Serial.printf("[%lums] [CAM] Bat dau quet (%s) -> MO stream :81\n",
+                (unsigned long)millis(), why);
 }
 
 static void endScan(const char *why) {
@@ -771,7 +783,8 @@ static void endScan(const char *why) {
   scanning = false;
   forcedScan = false;
   scanEndMs = millis();
-  Serial.printf("[CAM] Ket thuc quet (%s) -> DONG stream de ha nhiet\n", why);
+  Serial.printf("[%lums] [CAM] Ket thuc quet (%s) -> DONG stream de ha nhiet\n",
+                (unsigned long)millis(), why);
   streamStop();
   ss = SS_OFF;
 }
@@ -781,9 +794,10 @@ static void applyResult(const char *json) {
   if (scan) {
     lastScanNotifyMs = millis();
     if (!scanning) startScan("result");
-  } else if (scanning) {
+  } else if (scanning && !forcedScan) {
     // Bo qua ket qua /result cu (gui truoc khi bam nut). Chi ket thuc neu da
     // lau khong con tin hieu quet nao (UDP SCAN|0 se ket thuc ngay lap tuc).
+    // /scan (forcedScan) KHONG bi /result ket thuc -> du de test video.
     if (lastScanNotifyMs == 0 || millis() - lastScanNotifyMs > 1200) {
       endScan("result");
     }
@@ -1572,7 +1586,10 @@ void loop() {
   pollUdp();
 
   // ---------------- Doc trang thai ESP32-CAM (/result) ----------------
-  if (now - lastResultPoll >= RESULT_POLL_MS) {
+  // Khi DANG QUET: KHONG poll (hoac poll rat thua) de nhuong thoi gian doc
+  // frame tu stream :81. Viec bat/tat quet duoc bao qua UDP + fail-safe.
+  const uint32_t pollInterval = scanning ? 2000 : RESULT_POLL_MS;
+  if (now - lastResultPoll >= pollInterval) {
     lastResultPoll = now;
     pollResult();
   }
@@ -1633,11 +1650,18 @@ void loop() {
         lastFrameBytes = len;
         if (showJpeg(len)) {
           framesThisSec++;
+          framesTotal++;
           lastFrameValid = true;
           drawOverlay();
+          if (framesTotal <= 3 || (framesTotal % 60) == 0) {
+            Serial.printf("[%lums] [CAM] frame #%lu: %u B, decode %u ms\n",
+                          (unsigned long)now, (unsigned long)framesTotal,
+                          (unsigned)len, (unsigned)lastDecodeMs);
+          }
         }
       } else if (r < 0) {
-        Serial.println("[CAM] Stream loi -> ket noi lai");
+        Serial.printf("[%lums] [CAM] Stream loi -> ket noi lai\n",
+                      (unsigned long)now);
         streamStop();
         ss = SS_RETRY;
         lastRetry = now;
@@ -1645,6 +1669,14 @@ void loop() {
         else drawStatusPage("DANG QUET", "Dang lay hinh tu camera...", TFT_ORANGE);
       }
       // r == 0: frame qua lon, da bo -> doc tiep frame sau
+
+      // Canh bao: da ket noi ma 3s chua co frame nao
+      static uint32_t tLiveWarn = 0;
+      if (!lastFrameValid && now - tLiveWarn > 3000) {
+        tLiveWarn = now;
+        Serial.printf("[%lums] [CAM] Da ket noi nhung CHUA co frame nao (3s)\n",
+                      (unsigned long)now);
+      }
     } else if (ss == SS_RETRY || ss == SS_OFF) {
       if (now - lastRetry >= STREAM_RETRY_MS) {
         lastRetry = now;
