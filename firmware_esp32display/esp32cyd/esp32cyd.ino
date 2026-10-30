@@ -47,7 +47,7 @@
 #include <esp_heap_caps.h>
 
 // ============================== CAU HINH ====================================
-#define FW_VERSION        "2026-10-30-cyd9"
+#define FW_VERSION        "2026-10-30-cyd10"
 
 #define CYD_SELFTEST      1    // 1 = tu chay self-test luc boot (~2.5s)
 
@@ -60,7 +60,9 @@
 
 #define RESULT_POLL_MS    500      // doc /result (du phong neu UDP bi chan)
 #define STREAM_RETRY_MS   400      // thu lai stream NHANH khi dang quet
-#define SCAN_NOTIFY_MS    4000     // khong tin hieu quet 4s -> ket thuc (fail-safe)
+// Vong lap quet cua ESP32-CAM bi chan ~2-5s moi frame (cho server nhan dien
+// tra loi), nen thong bao UDP chi den moi ~2-5s -> fail-safe phai > 5s.
+#define SCAN_NOTIFY_MS    9000     // khong tin hieu quet 9s -> ket thuc (fail-safe)
 #define SCAN_MAX_MS       20000    // khong de "scanning" treo mai
 #define RESULT_HOLD_MS    4000     // giu khung cuoi sau khi quet xong
 
@@ -643,8 +645,10 @@ static int readFrame(size_t *outLen) {
   int prev = -1;
   uint32_t t0 = millis();
 
-  while (millis() - t0 < 5000) {
-    int b = streamBodyByte(3000);
+  // Trong dot quet, CAM chi gui frame moi ~2-5s (vong lap quet bi chan boi
+  // POST nhan dien) -> cho toi 7s moi coi la stream chet.
+  while (millis() - t0 < 12000) {
+    int b = streamBodyByte(7000);
     if (b < 0) return -1;
 
     if (!in) {
