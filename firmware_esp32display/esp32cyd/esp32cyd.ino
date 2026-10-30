@@ -1605,8 +1605,14 @@ void loop() {
   if (!scanning && !wifiDown && (now - lastDiscovery > 10000)) {
     lastDiscovery = now;
     if (!pollResult()) {
-      Serial.printf("[DISC] Chua doc duoc /result cua %s -> tim camera qua UDP\n",
-                    camIp);
+      // Chi in toi da 1 lan/phut: CAM khong chay server :80 la binh thuong khi
+      // chi xem hinh, log lap lai se lam rong man hinh Serial.
+      static uint32_t lastNoResultLog = 0;
+      if (now - lastNoResultLog > 60000) {
+        lastNoResultLog = now;
+        Serial.printf("[DISC] Chua doc duoc /result cua %s -> tim camera qua UDP\n",
+                      camIp);
+      }
       if (udpReady && discoverCam(700)) {
         Serial.printf("[DISC] Da cap nhat camera: %s\n", camIp);
         pollResult();
