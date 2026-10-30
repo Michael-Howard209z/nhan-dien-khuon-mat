@@ -154,6 +154,7 @@ Lenh Serial:
 | `/drv st7789` \| `/drv ili9341` \| `/drv auto` | Doi driver panel (luu NVS, ap dung sau `/reboot`) |
 | `/inv on` \| `/inv off` | Bat/tat dao mau (INVON/INVOFF) - doi ngay |
 | `/rgb rgb` \| `/rgb bgr` | Doi thu tu mau RGB <-> BGR - doi ngay |
+| `/imgrot 0..3` | Xoay/lat **hinh camera tren CYD** (0=giu nguyen, 1=xoay 180, 2=lat ngang, 3=lat doc). **Khong** doi huong sensor ben ESP32-CAM nen anh gui server nhan dien van dung. Luu NVS. |
 | `/touch` | Bat/tat in toa do cam ung (hieu chuan) |
 | `/stats` | fps, kich thuoc frame, thoi gian decode, heap |
 | `/reboot` | Khoi dong lai |

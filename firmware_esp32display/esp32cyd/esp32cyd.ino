@@ -47,7 +47,7 @@
 #include <esp_heap_caps.h>
 
 // ============================== CAU HINH ====================================
-#define FW_VERSION        "2026-10-30-cyd11"
+#define FW_VERSION        "2026-10-30-cyd12"
 
 #define CYD_SELFTEST      1    // 1 = tu chay self-test luc boot (~2.5s)
 
@@ -456,28 +456,87 @@ static void runOrientationWizard() {
 // ============================== JPEG DECODE =================================
 static int16_t drawOffX = 0;
 static int16_t drawOffY = 0;
+static int16_t imgOutW = 0;     // kich thuoc anh SAU scale (truoc khi ve)
+static int16_t imgOutH = 0;
 
-static int drawMCUs(JPEGDRAW *pDraw) {
-  int32_t x = pDraw->x + drawOffX;
-  int32_t y = pDraw->y + drawOffY;
-  int32_t stride = pDraw->iWidth;
-  int32_t w = pDraw->iWidthUsed ? pDraw->iWidthUsed : stride;
-  int32_t h = pDraw->iHeight;
-  if (w <= 0 || h <= 0 || stride <= 0) return 1;
-  if (w > stride) w = stride;
-  if (x >= LCD_W || y >= LCD_H || x + w <= 0 || y + h <= 0) return 1;
+// Xoay/lat HINH CAMERA chi tren CYD. KHONG doi huong sensor ben ESP32-CAM,
+// nen anh gui len server nhan dien van dung huong.
+//   0 = giu nguyen   1 = xoay 180 do (sua loi hinh bi nguoc)
+//   2 = lat ngang    3 = lat doc
+static uint8_t g_imgRot = 1;
+
+static const char *imgRotName(uint8_t r) {
+  switch (r) {
+    case 1:  return "xoay 180";
+    case 2:  return "lat ngang";
+    case 3:  return "lat doc";
+    default: return "giu nguyen";
+  }
+}
+
+// Ve mot khoi pixel (da cat theo kich thuoc man hinh)
+static void drawBlock(int32_t x, int32_t y, int32_t stride,
+                      int32_t w, int32_t h, const uint16_t *px) {
+  x += drawOffX;
+  y += drawOffY;
+  if (x >= LCD_W || y >= LCD_H || x + w <= 0 || y + h <= 0) return;
 
   int32_t drawW = w;
   int32_t drawH = h;
   if (x + drawW > LCD_W) drawW = LCD_W - x;
   if (y + drawH > LCD_H) drawH = LCD_H - y;
-  if (drawW <= 0 || drawH <= 0) return 1;
+  if (drawW <= 0 || drawH <= 0) return;
 
   if (drawW == stride) {
-    tft.pushImage(x, y, drawW, drawH, pDraw->pPixels);
+    tft.pushImage(x, y, drawW, drawH, px);
   } else {
-    for (int32_t r = 0; r < drawH; r++) {
-      tft.pushImage(x, y + r, drawW, 1, pDraw->pPixels + (size_t)r * stride);
+    for (int32_t r = 0; r < drawH; ++r) {
+      tft.pushImage(x, y + r, drawW, 1, px + (size_t)r * stride);
+    }
+  }
+}
+
+// Bo dem tam cho 1 khoi MCU (toi da 16x16 = 256 pixel)
+static uint16_t mcuTmp[16 * 16];
+
+static int drawMCUs(JPEGDRAW *pDraw) {
+  const int32_t stride = pDraw->iWidth;
+  int32_t w = pDraw->iWidthUsed ? pDraw->iWidthUsed : stride;
+  const int32_t h = pDraw->iHeight;
+  if (stride <= 0 || w <= 0 || h <= 0) return 1;
+  if (w > stride) w = stride;
+
+  // Khong xoay/lat, hoac khoi to hon du kien: ve thang
+  if (g_imgRot == 0 || w > 16 || h > 16 || imgOutW <= 0 || imgOutH <= 0) {
+    drawBlock(pDraw->x, pDraw->y, stride, w, h, pDraw->pPixels);
+    return 1;
+  }
+
+  // Vi tri khoi sau khi xoay/lat (trong khung anh goc)
+  int32_t tx = pDraw->x;
+  int32_t ty = pDraw->y;
+  if (g_imgRot == 1)      { tx = imgOutW - pDraw->x - w; ty = imgOutH - pDraw->y - h; }
+  else if (g_imgRot == 2) { tx = imgOutW - pDraw->x - w; }
+  else if (g_imgRot == 3) { ty = imgOutH - pDraw->y - h; }
+  if (tx < 0 || ty < 0) return 1;
+
+  const uint16_t *src = pDraw->pPixels;
+  for (int32_t r = 0; r < h; ++r) {
+    const int32_t sr = (g_imgRot == 1 || g_imgRot == 3) ? (h - 1 - r) : r;
+    uint16_t *dst = mcuTmp + (size_t)r * 16;
+    for (int32_t c = 0; c < w; ++c) {
+      const int32_t sc = (g_imgRot == 1 || g_imgRot == 2) ? (w - 1 - c) : c;
+      dst[c] = src[(size_t)sr * stride + sc];
+    }
+  }
+
+  // Khoi rong dung 16 pixel -> du lieu lien tuc trong mcuTmp -> ve 1 lan
+  if (w == 16) {
+    tft.pushImage(tx + drawOffX, ty + drawOffY, 16, h, mcuTmp);
+  } else {
+    for (int32_t r = 0; r < h; ++r) {
+      tft.pushImage(tx + drawOffX, ty + r + drawOffY, w, 1,
+                    mcuTmp + (size_t)r * 16);
     }
   }
   return 1;
@@ -498,6 +557,8 @@ static bool showJpeg(size_t len) {
 
   int outW = w >> shift;
   int outH = h >> shift;
+  imgOutW = (int16_t)outW;
+  imgOutH = (int16_t)outH;
   drawOffX = (outW < LCD_W) ? (int16_t)((LCD_W - outW) / 2) : 0;
   drawOffY = (outH < LCD_H) ? (int16_t)((LCD_H - outH) / 2) : 0;
 
@@ -1004,6 +1065,7 @@ static void handleSerialLine(char *line) {
     Serial.println("  /drv st7789|ili9341|auto   doi driver panel (can /reboot)");
     Serial.println("  /inv on|off         dao mau / tat dao mau (INVON/INVOFF)");
     Serial.println("  /rgb rgb|bgr        doi thu tu mau RGB <-> BGR");
+    Serial.println("  /imgrot 0..3        xoay/lat HINH CAMERA tren CYD (0=thuong 1=180 2=lat ngang 3=lat doc)");
     Serial.println("  /touch              bat/tat in toa do cam ung");
     Serial.println("  /stats              thong so stream / heap / fps");
     Serial.println("  /reboot             khoi dong lai");
@@ -1091,6 +1153,30 @@ static void handleSerialLine(char *line) {
     } else {
       Serial.printf("[TFT] Dao mau hien tai: %s. Dung: /inv on | /inv off\n",
                     g_inv ? "BAT (INVON)" : "TAT (INVOFF)");
+    }
+    return;
+  }
+
+  // Xoay/lat HINH CAMERA chi tren CYD (khong doi gi ben ESP32-CAM)
+  if (!strncmp(line, "/imgrot", 7) && (line[7] == '\0' || line[7] == ' ')) {
+    char *arg = line + 7;
+    while (*arg == ' ') arg++;
+    if (*arg == '\0') {
+      Serial.printf("[IMG] Dang dung: %u = %s\n",
+                    (unsigned)g_imgRot, imgRotName(g_imgRot));
+      Serial.println("[IMG] Dung: /imgrot 0 = giu nguyen | 1 = xoay 180 | 2 = lat ngang | 3 = lat doc");
+      return;
+    }
+    const uint8_t r = (uint8_t)constrain(atoi(arg), 0, 3);
+    g_imgRot = r;
+    prefs.putUChar("irot", r);
+    Serial.printf("[IMG] Da luu: %u = %s (chi tren CYD, CAM khong doi)\n",
+                  (unsigned)r, imgRotName(r));
+    // Ve lai ngay khung hinh dang giu trong bo dem (neu co) de thay ket qua
+    if (lastFrameBytes > 0 && showJpeg(lastFrameBytes)) {
+      drawOverlay();
+    } else if (!scanning) {
+      drawStandbyPage();
     }
     return;
   }
@@ -1410,6 +1496,12 @@ void setup() {
   // Mac dinh cho board CYD ST7789 cua du an: BGR + INVOFF (da kiem chung).
   g_bgr = prefs.getUChar("bgr", 1);
   g_inv = prefs.getUChar("inv", 0);
+
+  // Xoay/lat hinh camera tren CYD (mac dinh 1 = xoay 180 do)
+  g_imgRot = prefs.getUChar("irot", 1);
+  if (g_imgRot > 3) g_imgRot = 1;
+  Serial.printf("[IMG] Hinh camera tren CYD: %u = %s (/imgrot 0..3)\n",
+                (unsigned)g_imgRot, imgRotName(g_imgRot));
 
   {
     // drv: 0 = tu dong do panel, 1 = ep ST7789, 2 = ep ILI9341 (khong lam gi)
