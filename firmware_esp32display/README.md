@@ -131,8 +131,10 @@ flash_esp32cyd.bat COM5
    /ip 192.168.0.101
    ```
    (IP duoc luu vao NVS, lan sau khong can go lai).
-4. Man hinh se hien anh live + khung can mat. Hoc sinh bam nut tren
-   ESP32-CAM -> man hinh chuyen sang `DANG QUET`, sau do hien ten.
+4. Khi hoc sinh bam nut tren ESP32-CAM, CYD mo stream 15s va hien **anh
+   camera + khung can mat** de can dung khuon mat. CYD **KHONG hien ten /
+   ket qua diem danh** (man LCD rieng lo viec do). Ket qua chi ghi ra Serial
+   dang `[RES] <ten> | <trang thai> | <lop>`.
 
 Lenh Serial:
 
@@ -143,6 +145,7 @@ Lenh Serial:
 | `/ip 192.168.0.101` | Dat IP camera (luu NVS) |
 | `/find` | Tim camera qua UDP 4321 |
 | `/live on` / `/live off` | Bat/tat xem truc tiep |
+| `/scan` | Ep mo stream 20s de test video (khong can bam nut tren camera) |
 | `/test` | Chay lai self-test man hinh (4 mau + vien + 4 goc) |
 | `/rot 0..7` | Doi rotation ngay va **luu vao NVS** (mac dinh 1 = landscape 320x240) |
 | `/rot` | Xem rotation dang dung |
