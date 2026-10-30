@@ -47,7 +47,7 @@
 #include <esp_heap_caps.h>
 
 // ============================== CAU HINH ====================================
-#define FW_VERSION        "2026-10-29-cyd6"
+#define FW_VERSION        "2026-10-30-cyd7"
 
 #define CYD_SELFTEST      1    // 1 = tu chay self-test luc boot (~2.5s)
 
@@ -103,6 +103,8 @@ TFT_eSPI tft = TFT_eSPI();
 // rotation 1 hoac 3 moi ra NGANG; rotation 0/2 la DOC -> UI bi cat con 2/3.
 // Co the doi bang /rot <0..7>.
 static uint8_t g_rotation = 1;
+static uint8_t g_bgr = 0;   // 0 = RGB (mac dinh), 1 = BGR  - doi bang /rgb
+static uint8_t g_inv = 0;   // 0 = INVOFF, 1 = INVON       - doi bang /inv
 
 #if CYD_DISPLAY_ON_VSPI
   SPIClass touchSPI(HSPI);
@@ -326,9 +328,29 @@ static void drawSplash(const char *message) {
                   LCD_W - 24, 1, TFT_DARKGREY, C_BG);
 }
 
+// Ghi lai MADCTL voi bit thu tu mau theo g_bgr. TFT_eSPI luon ghi MADCTL
+// theo hang so luc build, nen can ghi de khi nguoi dung doi bang /rgb.
+static void writeMadctlColor() {
+  uint8_t v;
+  switch (g_rotation & 7) {
+    case 0:  v = 0x40; break;   // MX
+    case 1:  v = 0x20; break;   // MV
+    case 2:  v = 0x80; break;   // MY
+    case 3:  v = 0xE0; break;   // MX|MY|MV
+    case 4:  v = 0xC0; break;   // MX|MY
+    case 5:  v = 0x60; break;   // MX|MV
+    case 6:  v = 0x00; break;   // (khong lat)
+    default: v = 0xA0; break;   // MY|MV
+  }
+  if (g_bgr) v |= 0x08;         // bit BGR
+  tft.writecommand(0x36);       // MADCTL
+  tft.writedata(v);
+}
+
 static void applyRotation(uint8_t rotation) {
   g_rotation = rotation & 7;
   tft.setRotation(g_rotation);
+  writeMadctlColor();           // ap lai thu tu mau theo g_bgr
   Serial.printf("[TFT] rotation %u -> %dx%d\n",
                 (unsigned)g_rotation, tft.width(), tft.height());
 }
@@ -1036,6 +1058,8 @@ static void handleSerialLine(char *line) {
     Serial.println("  /wizard             tu thu rot 0..7 de tim huong man hinh dung");
     Serial.println("  /panel              doc ma chip dieu khien man hinh (ILI9341/ST7789)");
     Serial.println("  /drv st7789|ili9341|auto   doi driver panel (can /reboot)");
+    Serial.println("  /inv on|off         dao mau / tat dao mau (INVON/INVOFF)");
+    Serial.println("  /rgb rgb|bgr        doi thu tu mau RGB <-> BGR");
     Serial.println("  /touch              bat/tat in toa do cam ung");
     Serial.println("  /stats              thong so stream / heap / fps");
     Serial.println("  /reboot             khoi dong lai");
@@ -1096,8 +1120,40 @@ static void handleSerialLine(char *line) {
       Serial.println("[TFT] Che do tu dong do panel. Go /reboot de ap dung.");
     } else {
       Serial.printf("[TFT] driver dang dat: drv=%u (0=tu dong, 1=ST7789, 2=ILI9341)\n",
-                    (unsigned)prefs.getUChar("drv", 0));
+                    (unsigned)prefs.getUChar("drv", 1));
       Serial.println("[TFT] Dung: /drv st7789 | /drv ili9341 | /drv auto");
+    }
+    return;
+  }
+
+  // Dao mau (INVON/INVOFF) - doi ngay, luu NVS
+  if (!strncmp(line, "/inv", 4) && (line[4] == '\0' || line[4] == ' ')) {
+    char *arg = line + 4;
+    while (*arg == ' ') arg++;
+    if (!strcmp(arg, "on")) {
+      g_inv = 1; prefs.putUChar("inv", 1); applyInversion(true);
+    } else if (!strcmp(arg, "off")) {
+      g_inv = 0; prefs.putUChar("inv", 0); applyInversion(false);
+    } else {
+      Serial.printf("[TFT] Dao mau hien tai: %s. Dung: /inv on | /inv off\n",
+                    g_inv ? "BAT (INVON)" : "TAT (INVOFF)");
+    }
+    return;
+  }
+
+  // Thu tu mau RGB/BGR - doi ngay, luu NVS
+  if (!strncmp(line, "/rgb", 4) && (line[4] == '\0' || line[4] == ' ')) {
+    char *arg = line + 4;
+    while (*arg == ' ') arg++;
+    if (!strcmp(arg, "rgb")) {
+      g_bgr = 0; prefs.putUChar("bgr", 0); writeMadctlColor();
+      Serial.println("[TFT] Thu tu mau: RGB");
+    } else if (!strcmp(arg, "bgr")) {
+      g_bgr = 1; prefs.putUChar("bgr", 1); writeMadctlColor();
+      Serial.println("[TFT] Thu tu mau: BGR");
+    } else {
+      Serial.printf("[TFT] Thu tu mau hien tai: %s. Dung: /rgb rgb | /rgb bgr\n",
+                    g_bgr ? "BGR" : "RGB");
     }
     return;
   }
@@ -1326,9 +1382,16 @@ static void initPanelST7789() {
   for (uint8_t i = 0; i < sizeof(gamP); ++i) tft.writedata(gamP[i]);
   tft.writecommand(0xE1);
   for (uint8_t i = 0; i < sizeof(gamN); ++i) tft.writedata(gamN[i]);
-  tft.writecommand(0x21);                        // INVON
+  // Dao mau (INVON/INVOFF) do ham applyInversion() quyet dinh theo NVS,
+  // vi panel CYD ST7789 can INVOFF con mot so panel khac can INVON.
   tft.writecommand(0x29);                        // DISPON
   delay(50);
+}
+
+// Bat/tat dao mau (0x21 = INVON, 0x20 = INVOFF). CYD ST7789 can INVOFF.
+static void applyInversion(bool on) {
+  tft.writecommand(on ? 0x21 : 0x20);
+  Serial.printf("[TFT] Dao mau: %s\n", on ? "BAT (INVON)" : "TAT (INVOFF)");
 }
 
 // In chan doan panel ra Serial (dung o setup va lenh /panel).
@@ -1407,25 +1470,40 @@ void setup() {
   // Doc ma chip dieu khien. Neu la ST7789 (mot so ban CYD khong "R") thi nap
   // lai chuoi init ST7789 vi TFT_eSPI dang duoc build voi ILI9341_DRIVER.
   printPanelInfo();
+  // Che do mau (thu tu mau + dao mau) da luu bang /rgb va /inv
+  g_bgr = prefs.getUChar("bgr", 0);
+  g_inv = prefs.getUChar("inv", 0);
+
   {
     // drv: 0 = tu dong do panel, 1 = ep ST7789, 2 = ep ILI9341 (khong lam gi)
     const uint32_t pid = readPanelId();
-    const uint8_t drv = prefs.getUChar("drv", 0);
-    if (drv == 1 || (drv == 0 && looksLikeST7789(pid))) {
+    // Mac dinh 1 = ST7789 vi board cua du an nay dung panel ST7789V
+    // (board 2 cong USB, ESP32-2432S028 khong "R"). Doi bang /drv.
+    const uint8_t drv = prefs.getUChar("drv", 1);
+    const bool useST = (drv == 1) || (drv == 0 && looksLikeST7789(pid));
+
+    if (useST) {
       Serial.println("[TFT] Nap chuoi init ST7789...");
       initPanelST7789();
       tft.setSwapBytes(true);
+      // Panel CYD ST7789 can INVOFF (0x20) -> khong dao mau
+      applyInversion(g_inv != 0);
       Serial.println("[TFT] Da nap xong init ST7789");
     } else {
       Serial.printf("[TFT] Giu init ILI9341 (drv=%u)\n", (unsigned)drv);
+      if (prefs.isKey("inv")) applyInversion(g_inv != 0);
     }
   }
 
   // Khi firmware doi phien ban, bo qua rotation cu (co the chon sai o ban
   // truoc) de ve mac dinh 1 = landscape 320x240.
   if (prefs.getString("rotfw", "") != FW_VERSION) {
-    prefs.remove("rot");
     prefs.putString("rotfw", FW_VERSION);
+    // Chi xoa khi rotation cu la DOC (0/2/4/6) - huong NGANG (1/3/5/7) giu lai
+    const uint8_t curRot = prefs.getUChar("rot", 1);
+    if (curRot > 7 || curRot == 0 || curRot == 2 || curRot == 4 || curRot == 6) {
+      prefs.putUChar("rot", 1);
+    }
   }
 
   // Rotation: lay cai da luu bang lenh /rot (nho qua cac lan reboot).

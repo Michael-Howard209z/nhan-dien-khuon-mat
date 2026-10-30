@@ -5,7 +5,12 @@ Thu muc nay chua 2 firmware hien thi (khong nhan dien):
 | Thiet bi | Vai tro | Thu muc |
 |---|---|---|
 | ESP32-C3 Super Mini + LCD1602 (PCF8574 I2C) | Hien thi **ten** hoc sinh sau khi diem danh | `esp32lcd/` |
-| ESP32-2432S028R "CYD" 2.8" (ILI9341 + XPT2046) | Hien thi **anh live** de hoc sinh can mat + ten/ket qua | `esp32cyd/` |
+| ESP32-2432S028 "CYD" 2.8" (**ST7789V** + XPT2046) | Hien thi **anh live** de hoc sinh can mat + ten/ket qua | `esp32cyd/` |
+
+> **Luu y quan trong ve phan cung:** board CYD cua du an nay la ban
+> **ESP32-2432S028 (khong co chu "R", 2 cong USB)** dung panel **ST7789V**
+> chu khong phai ILI9341. Firmware mac dinh `drv=1` (ST7789) - xem muc
+> `/drv`, `/inv`, `/rgb` o bang lenh ben duoi.
 
 Ca hai deu **chi doc** ket qua tu ESP32-CAM qua `GET http://<ip-cam>/result`
 (moi 0.7 - 1 giay). Khong co nhan dien nao chay tren 2 board nay.
@@ -142,6 +147,10 @@ Lenh Serial:
 | `/rot 0..7` | Doi rotation ngay va **luu vao NVS** (mac dinh 1 = landscape 320x240) |
 | `/rot` | Xem rotation dang dung |
 | `/wizard` | Tu thu lan luot rot 0..7 (2s/buoc) + the kiem tra de tim huong dung |
+| `/panel` | Doc ma chip dieu khien man hinh (ILI9341 `0x009341` / ST7789 `0x858552`) |
+| `/drv st7789` \| `/drv ili9341` \| `/drv auto` | Doi driver panel (luu NVS, ap dung sau `/reboot`) |
+| `/inv on` \| `/inv off` | Bat/tat dao mau (INVON/INVOFF) - doi ngay |
+| `/rgb rgb` \| `/rgb bgr` | Doi thu tu mau RGB <-> BGR - doi ngay |
 | `/touch` | Bat/tat in toa do cam ung (hieu chuan) |
 | `/stats` | fps, kich thuoc frame, thoi gian decode, heap |
 | `/reboot` | Khoi dong lai |
@@ -181,8 +190,9 @@ Cach chon nhanh: cham goc **tren-trai**. Toa do in ra phai gan `(0,0)`.
 | Hien tuong | Nguyen nhan / cach xu ly |
 |---|---|
 | Man hinh trang, khong hien gi | Sai bien the day SPI -> doi `CYD_DISPLAY_ON_VSPI` 0 <-> 1. Kiem tra lai chan BL=21. |
-| Mau bi sai: DO <-> XANH, cyan hien thanh vang | Doi thu tu mau trong `tft_setup.h`: `#define TFT_RGB_ORDER TFT_RGB` <-> `TFT_BGR`. |
-| Mau bi am ban (inverted) | Board 2 cong USB co the dung panel ST7789: doi `#define CYD_PANEL_ST7789 0` thanh `1` trong `tft_setup.h`. |
+| Mau bi sai: DO <-> XANH, cyan hien thanh vang | Go `/rgb bgr` hoac `/rgb rgb` (doi ngay). Tuong duong doi `TFT_RGB_ORDER` trong `tft_setup.h`. |
+| Mau bi am ban / dao mau (INVON/INVOFF) | Go `/inv on` hoac `/inv off` (doi ngay). Panel CYD ST7789 can `/inv off`. |
+| Chon `/rot 1 3 5 7` ma hinh KHONG xoay gi ca | Panel la **ST7789** chu khong phai ILI9341: go `/drv st7789` roi `/reboot`. |
 | Man hinh toi, co chu mo | Chinh do sang bang PWM o `TFT_BL` (hien dang bat muc cao). |
 | Khong thay camera | Go `/find`, roi `/ip <ip-cam>`. Kiem tra cung WiFi/LAN, ESP32-CAM dang bat. |
 | Anh giat, fps thap | Xem `/stats`: neu decode > 60ms, kiem tra `SPI_FREQUENCY` (40MHz). Nhieu client stream cung luc se tranh frame. |
