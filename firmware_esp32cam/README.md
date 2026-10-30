@@ -269,3 +269,52 @@ Khi 3/3 NULL: kiểm tra theo thứ tự
   thêm `/setup` + `/api/cfg` + `/api/scan` (captive portal redirect).
 - `board_config.h` / `camera_pins.h` — chọn `CAMERA_MODEL_AI_THINKER`.
 - `partitions.csv`, `ci.json` — cấu hình build.
+
+## 9. Sự cố thường gặp (đúc kết từ thực tế)
+
+### CAM tự khởi động lại liên tục (`rst:0x3 (SW_RESET)`) — KHÔNG có dòng lỗi
+
+Triệu chứng: log lặp đi lặp lại
+```
+[CFG] ssid='Test' ...
+[BTN] GPIO13 nghi = HIGH ...
+WiFi connecting to 'Test'.....
+ets Jun  8 2016 00:22:57
+rst:0x3 (SW_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)
+```
+hoặc reset ngay giữa lúc đang quét (sau 1-2 frame, ngay khi WiFi/CAM hoạt động mạnh).
+
+**Nguyên nhân đã gặp thật: DÂY USB LỎNG / NGUỒN YẾU.**
+ESP32-CAM + WiFi + camera + LED cần dòng đỉnh khá lớn; tiếp xúc USB kém làm
+sụt áp tức thời → chip reset (thường KHÔNG in ra thông báo panic nào).
+
+Cách xử lý (theo thứ tự):
+1. **Cắm chặt lại dây USB / đổi dây khác** (nguyên nhân hay gặp nhất).
+2. Cấp nguồn 5V/2A riêng cho chân 5V–GND (không dùng chung với adapter nạp).
+3. Hàn thêm tụ 470–1000µF giữa 5V và GND sát board.
+4. Tránh bật flash (`BUTTON_SCAN_FLASH 1`) khi nguồn yếu.
+
+> Nếu log CÓ in `Guru Meditation Error` kèm backtrace thì mới là lỗi phần mềm —
+> khi đó gửi backtrace để xử lý.
+
+### Server không nhận được ảnh (nhận diện không chạy)
+
+Kiểm tra URL server trong log:
+```
+[CFG] URL server dang luu: http://192.168.1.9:5001/api/esp32/frame   ← SAI dải mạng
+[DISC] Tim thay server moi: http://192.168.0.50:5001/api/esp32/frame ← tự sửa khi server chạy
+```
+- URL cũ nằm ở dải mạng khác (vd `192.168.1.x`) trong khi WiFi hiện tại là
+  `192.168.0.x` → CAM không gửi được ảnh.
+- **Chỉ cần chạy server** (`start_server.bat`, có `discovery.py` broadcast
+  `FACESYNC|SERVER|...` mỗi ~5 s) là CAM **tự cập nhật URL đúng** vào NVS.
+- Hoặc đặt tay trên Serial 115200: `/url http://<ip-pc>:5001/api/esp32/frame`.
+
+### Màn hình CYD (ESP32-2432S028) không hiện hình khi bấm nút
+
+Xem `firmware_esp32display/README.md` mục B.7. Tóm tắt các nguyên nhân đã gặp:
+- CYD chưa biết IP camera (nay tự dò lại mỗi 10 s khi nghỉ).
+- Hàm poll `/result` bị treo lâu làm nghẽn vòng lặp → thu nhỏ timeout.
+- Fail-safe cắt stream quá sớm (4 s) trong khi vòng lặp quét của CAM bị chặn
+  ~2–5 s mỗi frame → nâng lên 9 s.
+- Dùng `/scan` để test riêng đường video mà không cần bấm nút.
